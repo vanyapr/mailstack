@@ -1,0 +1,13 @@
+- name: Start Next.js without any Docker socket or privileged executor
+  ansible.builtin.command:
+    argv: [docker, compose, --project-directory, '{{ mailstack_root }}', up, -d, --no-build, --wait, --wait-timeout, '120', web]
+  changed_when: false
+- name: Check BFF liveness on host loopback
+  ansible.builtin.uri:
+    url: http://127.0.0.1:3100/api/health
+    return_content: true
+  register: mailstack_web_health
+- ansible.builtin.assert:
+    that:
+      - mailstack_web_health.json.status == 'ok'
+      - mailstack_web_health.json.version == '0.2.0-dev'

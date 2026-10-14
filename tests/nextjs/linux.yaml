@@ -1,0 +1,18 @@
+# Isolated clean Linux acceptance VM, without host home mounts.
+vmType: vz
+arch: aarch64
+cpus: 2
+memory: 3GiB
+disk: 8GiB
+images:
+- location: https://cloud-images.ubuntu.com/minimal/releases/noble/release-20261001/ubuntu-24.04-minimal-cloudimg-arm64.img
+  arch: aarch64
+  digest: sha256:fbf6b15c50c474dc6dee5b3c74da212bb687a2625e877227828e6492d88dc151
+mounts: []
+containerd: {system: false, user: false}
+portForwards:
+- {guestPort: 3100, ignore: true}
+- {guestPort: 1080, ignore: true}
+- {guestPort: 1081, ignore: true}
+- {guestPort: 443, hostPort: 11443}
+- {guestPort: 80, hostPort: 11081}

@@ -1,0 +1,107 @@
+.mail-app .sidebar{overflow:auto}.mail-app .sidebar nav{margin-top:0}.mail-app .account{overflow-wrap:anywhere}.mail-app .sidebar .account small{max-width:165px;overflow-wrap:anywhere}.mail-app .sidebar-footer{padding-top:18px}.mail-app .sidebar .account{padding-block:16px}
+.mail-feedback{margin:12px 24px;padding:14px;border:1px solid var(--danger);color:var(--danger);border-radius:6px;font-size:14px;overflow-wrap:anywhere}.mail-feedback button{display:block;margin-top:12px}.load-more{width:100%;padding:14px;border-block:1px solid var(--line);color:var(--accent)}.mail-app .list-count{font-size:13px;white-space:normal;text-align:right}.mail-app .folder-tools{display:flex;justify-content:flex-end}.reader-frame{border:0;width:100%;min-height:320px;background:white;color:black}.message-pane>.loading{margin:24px}.move-select{max-width:150px;border:1px solid var(--line);background:var(--canvas);color:var(--text);min-height:44px;border-radius:5px}.reply-actions{display:flex;gap:12px;flex-wrap:wrap}.message .attachment{text-decoration:none;color:var(--text)}.message .attachments{display:flex;flex-direction:column;gap:10px}.starred{color:var(--accent)}.mail-app .settings-form{display:grid;gap:16px}.settings-form input,.settings-form textarea,.settings-form select{padding:10px;border:1px solid var(--line);border-radius:5px;background:var(--canvas);color:var(--text);width:100%}.settings-form label{display:grid;gap:8px;font-size:14px}.settings-form .checkbox-field{display:flex}.settings-form input[type=checkbox]{width:20px}.settings-form textarea{min-height:100px}.composer-footer .secondary{font-size:14px;min-height:46px;padding:10px}.admin-view .entity pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px}.admin-view .entity-controls{display:flex;gap:10px;flex-wrap:wrap}.admin-view .system-report{overflow:auto;max-height:600px;white-space:pre-wrap}.admin-view .inline-form{display:flex;gap:12px;align-items:end;flex-wrap:wrap}.admin-view .inline-form .field{flex:1;min-width:160px}
+@media(max-width:799px){.mail-app .message-toolbar{flex-wrap:wrap;height:auto}.mail-app .message-toolbar .move-select{max-width:110px}.reply-actions .secondary{font-size:14px}.composer-footer .secondary{padding-inline:8px}.mail-app .global-toolbar .layout-switch{display:none}}
+
+/* Feedback pass: keep the accepted palette and separate mobile navigation. */
+.mail-app .sidebar{overflow:visible}
+.brand-row{display:flex;align-items:center;justify-content:space-between;gap:4px;flex-shrink:0}
+.brand-row .brand{font-size:28px;padding-inline:6px;min-width:0}
+.brand-mark{display:none}
+.sidebar-toggle{color:var(--muted);flex-shrink:0}
+.mail-app .sidebar nav{overflow:auto;overscroll-behavior:contain;min-height:0;flex:0 1 auto;align-content:start;scrollbar-width:thin}
+.mail-app .folder{flex-shrink:0}
+.sidebar-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mail-app .folder-tools{margin-top:12px;padding-top:12px;border-top:1px solid var(--line);flex-shrink:0;justify-content:stretch}
+.mail-app .sidebar-footer{flex-shrink:0}
+.account-control{position:relative}
+.mail-app .account{width:100%;text-align:left;border-radius:7px;gap:10px;padding:12px 6px;margin-top:12px;min-height:64px}
+.account:hover,.account[aria-expanded=true]{background:var(--soft)}
+.account-copy{min-width:0;flex:1}
+.account-copy strong{display:block;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mail-app .sidebar .account small{max-width:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.account-menu{position:absolute;z-index:35;bottom:calc(100% + 8px);left:0;width:100%;min-width:200px;padding:8px;background:var(--canvas);border:1px solid var(--line);border-radius:8px;box-shadow:0 8px 28px #0002}
+.account-menu p{font-size:13px;color:var(--muted);padding:8px;margin:0;overflow-wrap:anywhere}
+.account-menu .folder{gap:12px;font-size:15px}
+.global-toolbar .layout-switch{gap:4px;padding:3px;border:1px solid var(--line);border-radius:7px}
+.global-toolbar .layout-switch button:nth-child(n){width:44px;min-height:44px;padding:9px;border:0;border-radius:4px}
+.button-tooltip{position:fixed;z-index:100;max-width:230px;padding:8px 12px;background:var(--canvas);color:var(--text);border:1px solid var(--line);border-radius:6px;box-shadow:0 4px 16px #0002;font-size:13px;line-height:1.4;pointer-events:none;overflow-wrap:anywhere}
+.tooltip-top{transform:translate(-50%,-100%)}
+.tooltip-right{transform:translateY(-50%)}
+.modal::backdrop{background:#080f1c80;-webkit-backdrop-filter:blur(7px);backdrop-filter:blur(7px)}
+.settings-modal,.folders-modal{width:min(620px,calc(100vw - 32px))}
+.settings-tabs{display:flex;border-bottom:1px solid var(--line);gap:4px;margin-bottom:20px}
+.settings-tabs button{flex:1;min-height:48px;padding:10px 8px;font-size:15px;border-bottom:2px solid transparent;color:var(--muted)}
+.settings-tabs button:hover{background:var(--soft)}
+.settings-tabs button[aria-selected=true]{color:var(--accent);border-bottom-color:var(--accent);font-weight:500}
+.settings-modal [role=tabpanel]{min-height:265px}
+.settings-form fieldset{margin:0;padding:0;border:0;display:grid;gap:18px;min-width:0}
+.settings-form .compose-button,.folder-create .compose-button{font-size:15px;min-height:48px}
+.settings-notice:empty,.folder-notice:empty{display:none}
+.settings-notice,.folder-notice{font-size:14px;color:var(--muted);margin:0 0 16px;line-height:1.5}
+.modal .feedback{margin-bottom:16px}
+.folder-create{display:grid!important;grid-template-columns:minmax(0,1fr) auto;align-items:end;padding:0 0 22px;border-bottom:1px solid var(--line)}
+.managed-folders{list-style:none;padding:0;margin:0;max-height:min(440px,45dvh);overflow:auto;overscroll-behavior:contain}
+.managed-folders>li+li{border-top:1px solid var(--line)}
+.managed-folder{display:flex;align-items:center;gap:14px;padding:14px 2px;min-height:72px}
+.managed-folder>svg{color:var(--muted)}
+.managed-folder-copy{flex:1;min-width:0;overflow-wrap:anywhere}
+.managed-folder-copy strong{display:block;font-size:15px;font-weight:500}
+.managed-folder-copy small{display:block;color:var(--muted);font-size:12px;margin-top:5px}
+.folder-actions,.folder-edit-actions{display:flex;gap:6px;align-items:center;flex-shrink:0}
+.folder-rename,.folder-delete-confirm{padding:0 2px 18px}
+.folder-delete-confirm p{font-size:14px;line-height:1.6;overflow-wrap:anywhere}
+.folder-edit-actions .secondary{min-height:44px;padding:8px 12px;font-size:14px}
+.danger-button{color:var(--danger);border-color:var(--danger)}
+/* Golos supplies upright fonts only; allow oblique synthesis in email text. */
+.rich-editor,.message-body{font-synthesis:style}
+@media(min-width:800px){
+  .sidebar-collapsed{grid-template-columns:80px minmax(0,1fr)}
+  .sidebar-collapsed .sidebar{padding-inline:12px}
+  .sidebar-collapsed .brand-row{flex-direction:column;gap:6px}
+  .sidebar-collapsed .brand{display:flex;align-items:center;justify-content:center;min-height:44px}
+  .sidebar-collapsed .brand-mark{display:block}
+  .sidebar-collapsed .brand-label,.sidebar-collapsed .sidebar-label,.sidebar-collapsed .folder-count,.sidebar-collapsed .account-copy,.sidebar-collapsed .account>svg{display:none}
+  .sidebar-collapsed .sidebar-toggle svg{transform:scaleX(-1)}
+  .sidebar-collapsed .sidebar>.compose-button{margin:14px 0 18px;padding-inline:0;min-height:48px}
+  .sidebar-collapsed .folder{justify-content:center;gap:0;padding:10px 0}
+  .sidebar-collapsed .account{justify-content:center;padding-inline:0}
+  .sidebar-collapsed .account-menu{left:calc(100% + 12px);bottom:0;width:240px}
+  .sidebar-collapsed .account-menu .folder{justify-content:flex-start;gap:12px;padding-inline:12px}
+}
+@media(max-width:799px){
+  .sidebar-toggle{display:none}
+  .brand-row .brand{padding-right:44px}
+  .mail-app .account{gap:14px}
+  .account-menu{min-width:0}
+  .settings-tabs button{font-size:13px;padding-inline:5px;min-height:48px}
+  .settings-modal [role=tabpanel]{min-height:285px}
+  .folder-create{gap:12px}
+  .managed-folder{gap:10px}
+  .folder-actions{gap:0}
+}
+
+.push-settings{gap:16px}
+.push-settings h3,.push-settings p{margin:0}
+@media(max-width:600px){
+  .settings-tabs{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}
+  .settings-tabs button{min-width:0;font-size:14px}
+}
+
+/* A real flag control stays separate from the button that opens the message. */
+.mail-app .mail-row-main{gap:12px}
+.mail-app .row-selection{display:flex;flex:0 0 24px;flex-direction:column;align-items:center;gap:4px}
+.mail-app .row-check-hit{display:flex;align-items:center;justify-content:center;width:24px;height:24px;cursor:pointer}
+.mail-app .row-star{width:32px;min-width:32px;min-height:32px;padding:7px;color:var(--muted);border-radius:6px}
+.mail-app .row-star>svg{width:18px;height:18px}
+.mail-app .row-star.starred{color:var(--accent)}
+.starred>svg{fill:currentColor}
+.mail-app .message-toolbar{flex-wrap:wrap;height:auto;gap:6px;padding-block:8px}
+.mail-app .message-toolbar>.action{flex-shrink:0}
+@media(pointer:coarse){.mail-app .row-star{width:44px;min-width:44px;min-height:44px}}
+@media(max-width:799px){
+  .mail-app .row-selection{align-self:center;flex-basis:44px;gap:0}
+  .mail-app .row-check-hit{width:44px;height:44px}
+  .mail-app .row-checkbox{display:block}
+  .mail-app .row-star{width:44px;min-width:44px;min-height:44px}
+  .mail-app .mail-row-main{padding-block:8px;gap:8px}
+}

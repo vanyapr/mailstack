@@ -1,0 +1,66 @@
+name: mailstack-nextjs
+x-logging: &logging
+  driver: json-file
+  options: {max-size: "10m", max-file: "3"}
+services:
+  mox:
+    profiles: [managed-mox]
+    image: ${MOX_IMAGE:?A verified Mox image digest is required}
+    pull_policy: never
+    container_name: mailstack-nextjs-mox
+    network_mode: host
+    restart: unless-stopped
+    stop_grace_period: 2m
+    working_dir: /mox
+    command: [/bin/mox, -config, /mox/config/mox.conf, serve]
+    volumes:
+      - ${MAILSTACK_ROOT:?}/mox:/mox
+      - ${MAILSTACK_ROOT:?}/tls:/tls:ro
+    security_opt: [no-new-privileges:true]
+    logging: *logging
+    healthcheck:
+      test: [CMD-SHELL, "/bin/mox -config /mox/config/mox.conf config account list >/dev/null"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
+  web:
+    image: ${WEB_IMAGE:?A verified Next.js image digest is required}
+    pull_policy: never
+    container_name: mailstack-nextjs-web
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 30s
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    ports: ["127.0.0.1:3100:3100"]
+    environment:
+      APP_ORIGIN: ${APP_ORIGIN:?HTTPS origin is required}
+      MOX_ORIGIN: http://172.30.95.1:1080
+      TRUST_NGINX: "1"
+      SYSTEM_STATUS_PATH: /run/mailstack/status.json
+      MAILSTACK_PUSH_DIR: /var/lib/mailstack-push
+      MAILSTACK_PUSH_ENABLED: ${MAILSTACK_PUSH_ENABLED:-0}
+    volumes:
+      - ${MAILSTACK_ROOT:?}/report:/run/mailstack:ro
+      - ${MAILSTACK_ROOT:?}/private/push:/var/lib/mailstack-push
+    tmpfs: ["/tmp:mode=1777,size=64m"]
+    networks:
+      bff: {ipv4_address: 172.30.95.2}
+    logging: *logging
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:3100/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      start_period: 30s
+      retries: 3
+networks:
+  bff:
+    name: mailstack-nextjs
+    driver: bridge
+    driver_opts: {com.docker.network.bridge.name: br-mailstack}
+    enable_ipv6: false
+    ipam:
+      config: [{subnet: 172.30.95.0/28, gateway: 172.30.95.1}]

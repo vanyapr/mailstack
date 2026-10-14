@@ -1,0 +1,14 @@
+mailstack_root: /opt/mailstack-nextjs
+mailstack_mode: managed
+mailstack_lab: false
+mailstack_certificate_mode: acme
+mailstack_existing_sites: []
+mailstack_backup_schedule: '*-*-* 02:30:00 UTC'
+mailstack_backup_repository: ''
+mailstack_nginx_file: /etc/nginx/conf.d/mailstack-nextjs.conf
+mailstack_admin_password: ''
+mailstack_first_password: ''
+mailstack_restic_password: ''
+mailstack_initialize_backup: false
+mailstack_push_enabled: false
+mailstack_existing_site_markers: {}

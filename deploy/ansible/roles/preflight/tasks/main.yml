@@ -1,0 +1,103 @@
+- name: Validate supported platform and installation scope
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.distribution == 'Ubuntu'
+      - ansible_facts.distribution_major_version | int >= 24
+      - mailstack_root == '/opt/mailstack-nextjs'
+      - mailstack_hostname is match('^[a-z0-9.-]+$')
+      - mailstack_domain is match('^[a-z0-9.-]+$')
+      - mailstack_mode in ['managed', 'connect']
+      - mailstack_certificate_mode in ['acme', 'reuse', 'lab']
+      - mailstack_certificate_mode != 'lab' or (mailstack_lab | bool and mailstack_domain.endswith('.test'))
+    fail_msg: Unsupported or unsafe installation configuration.
+- name: Collect port ownership without modifying services
+  ansible.builtin.command: ss -ltnp
+  register: mailstack_ports
+  changed_when: false
+  no_log: true
+- name: Refuse foreign owners of HTTP ports
+  ansible.builtin.assert:
+    that:
+      - item is search('nginx')
+    fail_msg: Port 80/443 belongs to another service. No service was stopped.
+  loop: "{{ mailstack_ports.stdout_lines | select('search', ':(80|443) ') | list }}"
+  no_log: true
+- name: Detect native Mox state
+  ansible.builtin.stat:
+    path: '{{ item }}'
+  loop: [/etc/mox/mox.conf, /var/lib/mox/config/mox.conf]
+  register: mailstack_native_mox
+- name: Refuse implicit migration of existing Mox
+  ansible.builtin.assert:
+    that:
+      - mailstack_native_mox.results | selectattr('stat.exists') | list | length == 0 or mailstack_mode == 'connect'
+    fail_msg: Existing Mox detected. Select connect mode; automatic migration is not allowed.
+- name: Detect installation ownership
+  ansible.builtin.stat:
+    path: '{{ mailstack_root }}/OWNED-BY-MAILSTACK-NEXTJS'
+  register: mailstack_owned
+- name: Inspect the private API firewall chain without modifying it
+  ansible.builtin.shell: 'if command -v iptables >/dev/null; then iptables -S MSNX_API 2>/dev/null || true; fi'
+  register: mailstack_previous_api_chain
+  changed_when: false
+- ansible.builtin.assert:
+    that: mailstack_previous_api_chain.stdout | trim | length == 0 or mailstack_owned.stat.exists
+    fail_msg: The API firewall chain already exists outside an owned installation. It was not adopted.
+- name: Inspect destination before adopting it
+  ansible.builtin.stat:
+    path: '{{ mailstack_root }}'
+  register: mailstack_destination
+- ansible.builtin.assert:
+    that: not mailstack_destination.stat.exists or mailstack_owned.stat.exists
+    fail_msg: The destination exists without a MailStack ownership marker. It was not adopted.
+- name: Refuse conflicting mail ports for a new managed installation
+  ansible.builtin.assert:
+    that:
+      - mailstack_ports.stdout_lines | select('search', ':(25|465|587|993) ') | list | length == 0
+    fail_msg: Mail ports are in use. Existing services and data are preserved.
+  when: mailstack_mode == 'managed' and not mailstack_owned.stat.exists
+- name: Check disk reserve
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.mounts | selectattr('mount', 'equalto', '/') | map(attribute='size_available') | first | int > 2147483648
+    fail_msg: Keep at least 2 GiB free before loading images.
+- name: Create owned directories
+  ansible.builtin.file:
+    path: '{{ item }}'
+    state: directory
+    mode: '0700'
+  loop: ['{{ mailstack_root }}', '{{ mailstack_root }}/tls', '{{ mailstack_root }}/private', '{{ mailstack_root }}/images', '{{ mailstack_root }}/rollback']
+- name: Prepare the daemon root with stable group permissions
+  ansible.builtin.file:
+    path: '{{ mailstack_root }}/mox'
+    state: directory
+    mode: '0750'
+    group: '2000'
+- name: Record installation ownership
+  ansible.builtin.copy:
+    content: "MailStack Next.js installation\n"
+    dest: '{{ mailstack_root }}/OWNED-BY-MAILSTACK-NEXTJS'
+    mode: '0600'
+- name: Create read-only runtime report
+  ansible.builtin.file:
+    path: '{{ mailstack_root }}/report'
+    state: directory
+    mode: '0755'
+- name: Initialize runtime report
+  ansible.builtin.copy:
+    content: '{"checks":[],"backups":{}}'
+    dest: '{{ mailstack_root }}/report/status.json'
+    mode: '0644'
+    force: false
+- name: Install operational prerequisites
+  ansible.builtin.apt:
+    name: [ca-certificates, python3, openssl, iptables]
+    update_cache: true
+    cache_valid_time: 3600
+    state: present
+- name: Add only explicitly reserved lab hostnames
+  ansible.builtin.blockinfile:
+    path: /etc/hosts
+    marker: '# {mark} MAILSTACK NEXTJS LAB'
+    block: "127.0.0.1 {{ [mailstack_hostname, 'mail.' + mailstack_domain, 'mta-sts.' + mailstack_domain, 'autoconfig.' + mailstack_domain, 'autodiscover.' + mailstack_domain] | unique | join(' ') }}"
+  when: mailstack_lab | bool

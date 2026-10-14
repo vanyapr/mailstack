@@ -1,0 +1,47 @@
+--- a/webmail/api.go
++++ b/webmail/api.go
+@@ -1254,0 +1255,10 @@
++	mailboxDelete(ctx, mailboxID, false)
++}
++
++// MailboxDeleteEmpty deletes only an empty, non-special mailbox. Checks and deletion
++// share the account write lock and transaction, including concurrent delivery.
++func (Webmail) MailboxDeleteEmpty(ctx context.Context, mailboxID int64) {
++	mailboxDelete(ctx, mailboxID, true)
++}
++
++func mailboxDelete(ctx context.Context, mailboxID int64, emptyOnly bool) {
+@@ -1266,0 +1277,14 @@
++			}
++
++			if emptyOnly {
++				if mb.SpecialUse != (store.SpecialUse{}) {
++					xcheckuserf(ctx, errors.New("cannot remove special mailbox"), "checking mailbox")
++				}
++				q := bstore.QueryTx[store.Message](tx)
++				q.FilterNonzero(store.Message{MailboxID: mb.ID})
++				q.FilterEqual("Expunged", false)
++				nonempty, err := q.Exists()
++				xcheckf(ctx, err, "checking mailbox messages")
++				if nonempty {
++					xcheckuserf(ctx, errors.New("mailbox is not empty"), "checking mailbox")
++				}
+--- a/webmail/api_test.go
++++ b/webmail/api_test.go
+@@ -276,0 +277,16 @@
++
++	// Empty-only deletion must preserve messages, system mailboxes and parents.
++	tneedError(t, func() { api.MailboxDeleteEmpty(ctx, testbox1.ID) })
++	api.ParsedMessage(ctx, testbox1Alt.ID)
++	tneedError(t, func() { api.MailboxDeleteEmpty(ctx, inbox.ID) })
++	tneedError(t, func() { api.MailboxDeleteEmpty(ctx, sent.ID) })
++	tneedError(t, func() { api.MailboxDeleteEmpty(ctx, 0) })
++	api.MailboxCreate(ctx, "EmptyOnly/Child")
++	emptyParent, err := bstore.QueryDB[store.Mailbox](ctx, acc.DB).FilterEqual("Name", "EmptyOnly").Get()
++	tcheck(t, err, "get empty parent")
++	emptyChild, err := bstore.QueryDB[store.Mailbox](ctx, acc.DB).FilterEqual("Name", "EmptyOnly/Child").Get()
++	tcheck(t, err, "get empty child")
++	tneedError(t, func() { api.MailboxDeleteEmpty(ctx, emptyParent.ID) })
++	api.MailboxDeleteEmpty(ctx, emptyChild.ID)
++	api.MailboxDeleteEmpty(ctx, emptyParent.ID)
++	tneedError(t, func() { api.MailboxDeleteEmpty(ctx, emptyChild.ID) })

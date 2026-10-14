@@ -1,0 +1,60 @@
+- name: Update verified application images with native backup and application rollback
+  hosts: mailstack
+  become: true
+  gather_facts: true
+  vars_files: [../defaults.yml]
+  tasks:
+    - name: Require an owned installation
+      ansible.builtin.stat:
+        path: '{{ mailstack_root }}/OWNED-BY-MAILSTACK-NEXTJS'
+      register: mailstack_owned_update
+    - ansible.builtin.assert:
+        that:
+          - mailstack_owned_update.stat.exists
+          - mailstack_mode == 'managed'
+        fail_msg: Update requires an owned managed installation and its verified backup procedure.
+    - name: Save current application variables and Compose file
+      ansible.builtin.copy:
+        src: '{{ mailstack_root }}/{{ item }}'
+        dest: '{{ mailstack_root }}/rollback/update-{{ item | replace(".", "_") }}'
+        remote_src: true
+        mode: '0600'
+      loop: [.env, compose.yaml]
+    - name: Create and read-verify a native backup before touching running services
+      ansible.builtin.command:
+        argv: [python3, '{{ mailstack_root }}/private/hostops.py', backup]
+    - block:
+        - ansible.builtin.include_role:
+            name: docker
+          vars:
+            mailstack_updating: true
+        - name: Apply content-addressed images
+          ansible.builtin.command:
+            argv: [docker, compose, --project-directory, '{{ mailstack_root }}', --profile, managed-mox, up, -d, --no-build, --wait, --wait-timeout, '120']
+        - ansible.builtin.include_role:
+            name: healthcheck
+        - name: Read current host maintenance configuration
+          ansible.builtin.slurp:
+            src: '{{ mailstack_root }}/private/runtime.json'
+          register: mailstack_update_runtime
+          no_log: true
+        - name: Record the successfully verified image versions
+          ansible.builtin.copy:
+            content: "{{ (mailstack_update_runtime.content | b64decode | from_json) | combine({'mox_image':mailstack_runtime_mox_image,'web_image':mailstack_runtime_web_image}) | to_nice_json }}"
+            dest: '{{ mailstack_root }}/private/runtime.json'
+            mode: '0600'
+          no_log: true
+
+      rescue:
+        - name: Restore previous application configuration without restoring user data
+          ansible.builtin.copy:
+            src: '{{ mailstack_root }}/rollback/update-{{ item | replace(".", "_") }}'
+            dest: '{{ mailstack_root }}/{{ item }}'
+            remote_src: true
+            mode: '0600'
+          loop: [.env, compose.yaml]
+        - name: Restart the previous compatible application images
+          ansible.builtin.command:
+            argv: [docker, compose, --project-directory, '{{ mailstack_root }}', --profile, managed-mox, up, -d, --no-build, --wait, --wait-timeout, '120']
+        - ansible.builtin.fail:
+            msg: Update failed. Previous application images restored; live mail data was not rolled back.

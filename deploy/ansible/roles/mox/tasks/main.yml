@@ -1,0 +1,133 @@
+- name: Inspect native dynamic configuration
+  ansible.builtin.stat:
+    path: '{{ mailstack_root }}/mox/config/domains.conf'
+  register: mailstack_dynamic_config
+  when: mailstack_mode == 'managed'
+- name: Initialize Mox once using the existing-webserver contract
+  ansible.builtin.command:
+    argv: [docker, run, --rm, --network, host, --workdir, /mox, --volume, '{{ mailstack_root }}/mox:/mox', '{{ mailstack_runtime_mox_image }}', /bin/mox, quickstart, -existing-webserver, -skipdial, -hostname, '{{ mailstack_hostname }}', '{{ mailstack_first_address }}', '2000']
+  register: mailstack_quickstart
+  when: mailstack_mode == 'managed' and not mailstack_dynamic_config.stat.exists
+  no_log: true
+- name: Retain private bootstrap diagnostics on the host
+  ansible.builtin.copy:
+    content: '{{ mailstack_quickstart.stdout | default("") }}{{ mailstack_quickstart.stderr | default("") }}'
+    dest: '{{ mailstack_root }}/private/bootstrap.log'
+    mode: '0600'
+  when: mailstack_quickstart is changed
+  no_log: true
+- name: Require the supplied admin password for first initialization
+  ansible.builtin.assert:
+    that: mailstack_admin_password | length >= 12
+  when: mailstack_quickstart is changed
+  no_log: true
+- name: Inspect administrator initialization receipt
+  ansible.builtin.stat:
+    path: '{{ mailstack_root }}/private/admin-initialized'
+  register: mailstack_admin_initialized
+- name: Inspect mailbox initialization receipt
+  ansible.builtin.stat:
+    path: '{{ mailstack_root }}/private/mailbox-initialized'
+  register: mailstack_mailbox_initialized
+- name: Protect the native quickstart log
+  ansible.builtin.file:
+    path: '{{ mailstack_root }}/mox/quickstart.log'
+    mode: '0600'
+  when: mailstack_mode == 'managed'
+- name: Configure the verified listeners and external certificates
+  ansible.builtin.template:
+    src: mox.conf.j2
+    dest: '{{ mailstack_root }}/mox/config/mox.conf'
+    mode: '0640'
+    group: '2000'
+    backup: true
+  when: mailstack_mode == 'managed'
+  register: mailstack_mox_static
+- name: Normalize the data root for the unprivileged daemon
+  ansible.builtin.file:
+    path: '{{ mailstack_root }}/mox'
+    state: directory
+    mode: '0750'
+    group: '2000'
+  when: mailstack_mode == 'managed'
+- name: Set initial administrator password through stdin
+  ansible.builtin.command:
+    argv: [docker, run, --rm, -i, --workdir, /mox, --volume, '{{ mailstack_root }}/mox:/mox', --volume, '{{ mailstack_root }}/tls:/tls:ro', '{{ mailstack_runtime_mox_image }}', /bin/mox, -config, /mox/config/mox.conf, setadminpassword]
+    stdin: '{{ mailstack_admin_password }}'
+  when: mailstack_mode == 'managed' and not mailstack_admin_initialized.stat.exists
+  no_log: true
+- name: Record administrator initialization after native success
+  ansible.builtin.copy:
+    content: 'Native administrator password initialized once.'
+    dest: '{{ mailstack_root }}/private/admin-initialized'
+    mode: '0600'
+    force: false
+  when: mailstack_mode == 'managed'
+- name: Check complete Mox configuration before starting
+  ansible.builtin.command:
+    argv: [docker, run, --rm, --network, host, --workdir, /mox, --volume, '{{ mailstack_root }}/mox:/mox', --volume, '{{ mailstack_root }}/tls:/tls:ro', '{{ mailstack_runtime_mox_image }}', /bin/mox, -config, /mox/config/mox.conf, config, test]
+  changed_when: false
+  when: mailstack_mode == 'managed'
+- block:
+    - name: Install API firewall rules
+      ansible.builtin.copy:
+        src: '{{ playbook_dir }}/../../bin/firewall.sh'
+        dest: '{{ mailstack_root }}/private/firewall.sh'
+        mode: '0700'
+    - name: Persist the private API ACL after reboot
+      ansible.builtin.copy:
+        content: |
+          [Unit]
+          Description=MailStack private BFF gateway ACL
+          After=docker.service
+          Requires=docker.service
+          [Service]
+          Type=oneshot
+          ExecStart=/opt/mailstack-nextjs/private/firewall.sh
+          RemainAfterExit=yes
+          [Install]
+          WantedBy=multi-user.target
+        dest: /etc/systemd/system/mailstack-nextjs-firewall.service
+        mode: '0644'
+      register: mailstack_firewall_service
+    - ansible.builtin.systemd_service:
+        name: mailstack-nextjs-firewall
+        daemon_reload: '{{ mailstack_firewall_service.changed }}'
+        enabled: true
+        state: started
+  when: mailstack_mode == "managed"
+- name: Start managed Mox with a bounded readiness wait
+  ansible.builtin.command:
+    argv: [docker, compose, --project-directory, '{{ mailstack_root }}', --profile, managed-mox, up, -d, --no-build, --wait, --wait-timeout, '120', mox]
+  register: mailstack_mox_started
+  changed_when: mailstack_quickstart is changed or mailstack_mox_static is changed
+  when: mailstack_mode == 'managed'
+- name: Restart only for an actual static configuration/certificate change
+  ansible.builtin.command:
+    argv: [docker, compose, --project-directory, '{{ mailstack_root }}', --profile, managed-mox, restart, mox]
+  when: mailstack_mode == 'managed' and (mailstack_mox_static is changed or mailstack_certificate_staged is changed) and not (mailstack_quickstart is changed)
+- name: Set the first mailbox password once through stdin
+  ansible.builtin.command:
+    argv: [docker, exec, -i, mailstack-nextjs-mox, /bin/mox, -config, /mox/config/mox.conf, setaccountpassword, '{{ mailstack_first_account }}']
+    stdin: '{{ mailstack_first_password }}'
+  when: mailstack_mode == 'managed' and not mailstack_mailbox_initialized.stat.exists
+  no_log: true
+- name: Record mailbox initialization after native success
+  ansible.builtin.copy:
+    content: 'Native first mailbox password initialized once.'
+    dest: '{{ mailstack_root }}/private/mailbox-initialized'
+    mode: '0600'
+    force: false
+  when: mailstack_mode == 'managed'
+- name: Generate native DNS records
+  ansible.builtin.command:
+    argv: [docker, exec, mailstack-nextjs-mox, /bin/mox, -config, /mox/config/mox.conf, config, dnsrecords, '{{ mailstack_domain }}']
+  register: mailstack_dns_records
+  changed_when: false
+  when: mailstack_mode == 'managed'
+- name: Save DNS records without account secrets
+  ansible.builtin.copy:
+    content: '{{ mailstack_dns_records.stdout }}'
+    dest: '{{ mailstack_root }}/dns-records.txt'
+    mode: '0600'
+  when: mailstack_mode == 'managed'

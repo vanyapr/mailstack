@@ -1,0 +1,529 @@
+--- a/backup.go
++++ b/backup.go
+@@ -509,13 +509,21 @@
+ 				xerrx("opening junk filter for account (not backed up)", err)
+ 			}
+ 		} else {
+-			db := jf.DB()
+-			jfpath := filepath.Join("accounts", acc.Name, "junkfilter.db")
+-			backupDB(db, jfpath)
+-			bloompath := filepath.Join("accounts", acc.Name, "junkfilter.bloom")
+-			backupFile(bloompath)
+-			err := jf.Close()
+-			xctl.log.Check(err, "closing junkfilter")
++			// A newly created, untrained filter has not persisted its message
++			// counts yet. Save before copying either file so the first backup
++			// can be opened independently of the original account.
++			if err := jf.Save(); err != nil {
++				xerrx("saving junk filter for account (not backed up)", err)
++			} else {
++				db := jf.DB()
++				jfpath := filepath.Join("accounts", acc.Name, "junkfilter.db")
++				backupDB(db, jfpath)
++				bloompath := filepath.Join("accounts", acc.Name, "junkfilter.bloom")
++				backupFile(bloompath)
++			}
++			if err := jf.Close(); err != nil {
++				xerrx("closing junkfilter", err)
++			}
+ 		}
+ 
+ 		dstdbpath := filepath.Join(dstDataDir, dbpath)
+--- a/ctl_test.go
++++ b/ctl_test.go
+@@ -21,6 +21,7 @@
+ 	"github.com/mjl-/mox/dmarcdb"
+ 	"github.com/mjl-/mox/dns"
+ 	"github.com/mjl-/mox/imapclient"
++	"github.com/mjl-/mox/junk"
+ 	"github.com/mjl-/mox/mlog"
+ 	"github.com/mjl-/mox/mox-"
+ 	"github.com/mjl-/mox/mtastsdb"
+@@ -47,10 +48,17 @@
+ 	os.RemoveAll("testdata/ctl/data")
+ 	mox.ConfigStaticPath = filepath.FromSlash("testdata/ctl/config/mox.conf")
+ 	mox.ConfigDynamicPath = filepath.FromSlash("testdata/ctl/config/domains.conf")
++	// Account configuration commands modify the fixture. Restore it so the
++	// first-backup regression remains valid when this test runs repeatedly.
++	originalConfig, err := os.ReadFile(mox.ConfigDynamicPath)
++	tcheck(t, err, "read original dynamic config")
++	t.Cleanup(func() {
++		tcheck(t, os.WriteFile(mox.ConfigDynamicPath, originalConfig, 0600), "restore dynamic config fixture")
++	})
+ 	if errs := mox.LoadConfig(ctxbg, pkglog, true, false); len(errs) > 0 {
+ 		t.Fatalf("loading mox config: %v", errs)
+ 	}
+-	err := store.Init(ctxbg)
++	err = store.Init(ctxbg)
+ 	tcheck(t, err, "store init")
+ 	defer store.Close()
+ 	defer store.Switchboard()()
+@@ -523,6 +531,11 @@
+ 		ctlcmdReassignthreads(xctl, "")
+ 	})
+ 
++	// A never-used account must have a readable junk filter in its first backup.
++	testctl(func(xctl *ctl) {
++		ctlcmdConfigAccountAdd(xctl, "backupfresh", "backupfresh@mox.example")
++	})
++
+ 	// "backup", backup account.
+ 	err = dmarcdb.Init()
+ 	tcheck(t, err, "dmarcdb init")
+@@ -539,6 +552,15 @@
+ 		tcheck(t, err, "writing receivedid.key")
+ 		ctlcmdBackup(xctl, filepath.FromSlash("testdata/ctl/data/tmp/backup"), false)
+ 	})
++
++	fresh, ok := mox.Conf.Account("backupfresh")
++	if !ok || fresh.JunkFilter == nil {
++		t.Fatal("fresh account must have a junk filter")
++	}
++	filterDir := filepath.FromSlash("testdata/ctl/data/tmp/backup/data/accounts/backupfresh")
++	filter, err := junk.OpenFilter(ctxbg, pkglog, fresh.JunkFilter.Params, filepath.Join(filterDir, "junkfilter.db"), filepath.Join(filterDir, "junkfilter.bloom"), true)
++	tcheck(t, err, "open junk filter from first backup of unused account")
++	tcheck(t, filter.Close(), "close backed up junk filter")
+ 
+ 	// Verify the backup.
+ 	xcmd := cmd{
+--- a/moxvar/version.go
++++ b/moxvar/version.go
+@@ -12,6 +12,10 @@
+ // VersionBare does not add a "+modifications", goversion or other suffix to the version.
+ var VersionBare string
+ 
++// BuildVersion identifies the reviewed Mailstack source patch when built from
++// an authenticated source archive instead of the Go module cache.
++var BuildVersion string
++
+ func init() {
+ 	Version = "(devel)"
+ 	VersionBare = "(devel)"
+@@ -19,6 +23,12 @@
+ 	defer func() {
+ 		Version += "-" + runtime.Version()
+ 	}()
++
++	if BuildVersion != "" {
++		Version = BuildVersion
++		VersionBare = BuildVersion
++		return
++	}
+ 
+ 	buildInfo, ok := debug.ReadBuildInfo()
+ 	if !ok {
+--- a/main.go
++++ b/main.go
+@@ -1413,6 +1413,8 @@
+ }
+ 
+ func cmdConfigDNSCheck(c *cmd) {
++	var asJSON bool
++	c.flag.BoolVar(&asJSON, "json", false, "print structured DNS checks; inspect Errors, not the process exit code, for readiness")
+ 	c.params = "$domain"
+ 	c.help = "Check the DNS records with the configuration for the domain, and print any errors/warnings."
+ 	args := c.Parse()
+@@ -1454,6 +1456,10 @@
+ 	}
+ 
+ 	result := webadmin.Admin{}.CheckDomain(context.Background(), args[0])
++	if asJSON {
++		xcheckf(writeDNSCheckJSON(os.Stdout, d.ASCII, result), "writing DNS check JSON")
++		return
++	}
+ 	printResult("DNSSEC", result.DNSSEC.Result)
+ 	printResult("IPRev", result.IPRev.Result)
+ 	printResult("MX", result.MX.Result)
+@@ -1468,6 +1474,13 @@
+ 	printResult("SRV conf", result.SRVConf.Result)
+ 	printResult("Autoconf", result.Autoconf.Result)
+ 	printResult("Autodiscover", result.Autodiscover.Result)
++}
++
++// writeDNSCheckJSON preserves the native structured diagnostics. A successful
++// command exit only means the check ran; callers must inspect section Errors.
++func writeDNSCheckJSON(w io.Writer, domain string, result webadmin.CheckResult) error {
++	result.Domain = domain
++	return json.NewEncoder(w).Encode(result)
+ }
+ 
+ func cmdConfigEnsureACMEHostprivatekeys(c *cmd) {
+--- a/webadmin/admin_test.go
++++ b/webadmin/admin_test.go
+@@ -442,7 +442,19 @@
+ 	dialer := &net.Dialer{Deadline: time.Now().Add(-time.Second), Cancel: done}
+ 
+ 	checkDomain(ctxbg, resolver, dialer, "mox.example")
+-	// todo: check returned data
++
++	// Missing DNS records must remain explicit structured errors even though
++	// the historical CLI reports a successful process exit for these results.
++	resolver.MX = map[string][]*net.MX{}
++	resolver.TXT = map[string][]string{}
++	missing := checkDomain(ctxbg, resolver, dialer, "mox.example")
++	for name, errors := range map[string][]string{
++		"MX": missing.MX.Errors, "SPF": missing.SPF.Errors, "DKIM": missing.DKIM.Errors,
++	} {
++		if len(errors) == 0 {
++			t.Errorf("missing %s records must produce structured errors", name)
++		}
++	}
+ 
+ 	Admin{}.Domains(ctxbg)             // todo: check results
+ 	dnsblsStatus(ctxbg, log, resolver) // todo: check results
+--- /dev/null
++++ b/dnscheck_json_test.go
+@@ -0,0 +1,47 @@
++package main
++
++import (
++	"bytes"
++	"encoding/json"
++	"testing"
++
++	"github.com/mjl-/mox/webadmin"
++)
++
++func TestDNSCheckJSONPreservesNativeDiagnostics(t *testing.T) {
++	for _, section := range []string{"MX", "SPF", "DKIM"} {
++		t.Run(section, func(t *testing.T) {
++			result := webadmin.CheckResult{}
++			failure := webadmin.Result{Errors: []string{"missing DNS record"}, Warnings: []string{"native warning"}}
++			switch section {
++			case "MX":
++				result.MX.Result = failure
++			case "SPF":
++				result.SPF.Result = failure
++			case "DKIM":
++				result.DKIM.Result = failure
++			}
++			var output bytes.Buffer
++			if err := writeDNSCheckJSON(&output, "example.test", result); err != nil {
++				t.Fatal(err)
++			}
++			var decoded map[string]json.RawMessage
++			if err := json.Unmarshal(output.Bytes(), &decoded); err != nil {
++				t.Fatal(err)
++			}
++			if string(decoded["Domain"]) != `"example.test"` {
++				t.Fatal("missing domain identity")
++			}
++			var diagnostics webadmin.Result
++			if err := json.Unmarshal(decoded[section], &diagnostics); err != nil {
++				t.Fatal(err)
++			}
++			if len(diagnostics.Errors) != 1 || diagnostics.Errors[0] != "missing DNS record" {
++				t.Fatal("native errors lost")
++			}
++			if len(diagnostics.Warnings) != 1 || diagnostics.Warnings[0] != "native warning" {
++				t.Fatal("native warnings lost")
++			}
++		})
++	}
++}
+--- a/imapclient/client.go
++++ b/imapclient/client.go
+@@ -155,7 +155,7 @@
+ 	c.xtw = moxio.NewTraceWriter(c.log, "CW: ", &c)
+ 	c.xbw = bufio.NewWriter(c.xtw)
+ 
+-	defer c.recoverErr(&rerr)
++	defer c.recover(&rerr, nil)
+ 	tag := c.xnonspace()
+ 	if tag != "*" {
+ 		c.xerrorf("expected untagged *, got %q", tag)
+@@ -184,10 +184,6 @@
+ 	panic("not reached")
+ }
+ 
+-func (c *Conn) recoverErr(rerr *error) {
+-	c.recover(rerr, nil)
+-}
+-
+ func (c *Conn) recover(rerr *error, resp *Response) {
+ 	if *rerr != nil {
+ 		if r, ok := (*rerr).(Response); ok && resp != nil {
+@@ -336,7 +332,7 @@
+ // because the server may immediate close the underlying connection when it sees
+ // the connection is being closed.
+ func (c *Conn) Close() (rerr error) {
+-	defer c.recoverErr(&rerr)
++	defer c.recover(&rerr, nil)
+ 
+ 	if c.conn == nil {
+ 		return nil
+--- /dev/null
++++ b/imapclient/recover_test.go
+@@ -0,0 +1,91 @@
++package imapclient
++
++import (
++	"errors"
++	"io"
++	"log/slog"
++	"net"
++	"strings"
++	"testing"
++)
++
++type recoverTestConn struct {
++	net.Conn
++	reader     io.Reader
++	closeErr   error
++	closePanic any
++}
++
++func (c recoverTestConn) Read(p []byte) (int, error) { return c.reader.Read(p) }
++func (c recoverTestConn) Close() error {
++	if c.closePanic != nil {
++		panic(c.closePanic)
++	}
++	return c.closeErr
++}
++
++func TestCloseReturnsConnectionError(t *testing.T) {
++	for _, withHandler := range []bool{false, true} {
++		t.Run(map[bool]string{false: "without-handler", true: "with-handler"}[withHandler], func(t *testing.T) {
++			defer func() {
++				if p := recover(); p != nil {
++					t.Fatalf("Close panicked instead of returning an error: %v", p)
++				}
++			}()
++			want := errors.New("connection already closed by peer")
++			c := &Conn{Proto: Proto{conn: recoverTestConn{closeErr: want}}}
++			calls := 0
++			if withHandler {
++				c.errHandle = func(err error) {
++					calls++
++					if !errors.Is(err, want) {
++						t.Errorf("handler error %v, want %v", err, want)
++					}
++				}
++			}
++			if err := c.Close(); !errors.Is(err, want) {
++				t.Fatalf("Close error %v, want %v", err, want)
++			}
++			if withHandler && calls != 1 {
++				t.Fatalf("handler calls %d, want 1", calls)
++			}
++		})
++	}
++}
++
++func TestNewReturnsGreetingError(t *testing.T) {
++	for _, greeting := range []string{"", "invalid greeting\r\n"} {
++		t.Run(map[bool]string{true: "eof", false: "malformed"}[greeting == ""], func(t *testing.T) {
++			defer func() {
++				if p := recover(); p != nil {
++					t.Fatalf("New panicked instead of returning an error: %v", p)
++				}
++			}()
++			calls := 0
++			var handled error
++			opts := &Opts{Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), Error: func(err error) {
++				calls++
++				handled = err
++			}}
++			c, err := New(recoverTestConn{reader: strings.NewReader(greeting)}, opts)
++			if c != nil || err == nil {
++				t.Fatalf("New = %v, %v, want nil client and error", c, err)
++			}
++			if calls != 1 || handled != err {
++				t.Fatalf("handler calls %d, error %v; want once with returned error %v", calls, handled, err)
++			}
++		})
++	}
++}
++
++func TestClosePreservesUnexpectedPanic(t *testing.T) {
++	want := "unexpected implementation panic"
++	defer func() {
++		if got := recover(); got != want {
++			t.Fatalf("panic %v, want %q", got, want)
++		}
++	}()
++	c := &Conn{Proto: Proto{conn: recoverTestConn{closePanic: want}}}
++	c.Close()
++	t.Fatal("unexpected panic was swallowed")
++}
+--- a/message/part.go
++++ b/message/part.go
+@@ -490,6 +490,16 @@
+ 	},
+ }
+ 
++// DecodeHeader decodes RFC 2047 encoded-words with the same charset support as
++// message envelopes. Invalid encoding or an unknown charset leaves the original
++// value searchable; stored headers and message bytes are never changed.
++func DecodeHeader(value string) string {
++	if decoded, err := wordDecoder.DecodeHeader(value); err == nil {
++		return decoded
++	}
++	return value
++}
++
+ func parseEnvelope(log mlog.Log, h mail.Header) (*Envelope, error) {
+ 	date, _ := h.Date()
+ 
+@@ -504,10 +514,7 @@
+ 		date = time.Unix(date.Unix(), 0).UTC()
+ 	}
+ 
+-	subject := h.Get("Subject")
+-	if s, err := wordDecoder.DecodeHeader(subject); err == nil {
+-		subject = s
+-	}
++	subject := DecodeHeader(h.Get("Subject"))
+ 
+ 	env := &Envelope{
+ 		date,
+--- a/imapserver/search.go
++++ b/imapserver/search.go
+@@ -710,7 +710,7 @@
+ 			return false
+ 		}
+ 		for _, v := range h.Values(field) {
+-			if strings.Contains(strings.ToLower(v), lower) {
++			if strings.Contains(strings.ToLower(message.DecodeHeader(v)), lower) {
+ 				return true
+ 			}
+ 		}
+@@ -891,7 +891,7 @@
+ 		}
+ 		k := textproto.CanonicalMIMEHeaderKey(sk.headerField)
+ 		for _, v := range h.Values(k) {
+-			if lower == "" || strings.Contains(strings.ToLower(v), lower) {
++			if lower == "" || strings.Contains(strings.ToLower(message.DecodeHeader(v)), lower) {
+ 				return true
+ 			}
+ 		}
+--- a/store/search.go
++++ b/store/search.go
+@@ -75,9 +75,21 @@
+ // non-miss, the caller checks if there was a hit.
+ func (ws WordSearch) matchPart(log mlog.Log, p *message.Part, headerToo bool, seen map[int]bool) (miss bool, rerr error) {
+ 	if headerToo {
+-		miss, err := ws.searchReader(log, p.HeaderReader(), seen)
+-		if miss || err != nil || ws.isQuickHit(seen) {
+-			return miss, err
++		// RFC 9051 section 6.4.4 requires decoding MIME header strings before
++		// comparing text. Decode each field separately so an unknown charset
++		// in one field cannot prevent matching valid encoded-words in another.
++		header, err := p.Header()
++		if err != nil {
++			return false, err
++		}
++		for name, values := range header {
++			for _, value := range values {
++				text := name + ": " + message.DecodeHeader(value) + "\r\n"
++				miss, err := ws.searchReader(log, strings.NewReader(text), seen)
++				if miss || err != nil || ws.isQuickHit(seen) {
++					return miss, err
++				}
++			}
+ 		}
+ 	}
+ 
+--- /dev/null
++++ b/imapserver/search_rfc2047_test.go
+@@ -0,0 +1,100 @@
++package imapserver
++
++import (
++	"encoding/base64"
++	"fmt"
++	"mime"
++	"testing"
++	"time"
++
++	"github.com/mjl-/mox/imapclient"
++)
++
++// RFC 9051 section 6.4.4 requires decoding MIME header strings before
++// comparing SEARCH text. These messages contain no real mailbox data.
++func TestSearchRFC2047Headers(t *testing.T) {
++	tc := start(t, false)
++	defer tc.close()
++	tc.login("mjl@mox.example", password0)
++	tc.client.Select("inbox")
++
++	bword := func(s string) string { return mime.BEncoding.Encode("utf-8", s) }
++	qword := func(s string) string { return mime.QEncoding.Encode("utf-8", s) }
++	messages := []struct {
++		subject, extra, body, transfer string
++	}{
++		{bword("Mailstack входящий тест"), "X-Note: =?ISO-8859-1?Q?Caf=E9?=\r\n", "ordinary body token", "8bit"},
++		{qword("Склад ") + "\r\n\t" + bword("Проверка"), "", "ordinary body token", "8bit"},
++		{"=?ISO-8859-1?Q?Caf=E9?=", "", base64.StdEncoding.EncodeToString([]byte("Тело кодировка")), "base64"},
++		{"prefix =?UTF-8?B?%%%?= rawtail", "X-Unknown: =?X-UNKNOWN?Q?rawtoken?=\r\nX-Note: first\r\nX-Note: " + bword("Сохранённый заголовок") + "\r\n", "ordinary body token", "8bit"},
++		{"ordinary subject", "", bword("ТолькоВТеле"), "8bit"},
++		{"Прямой UTF-8 заголовок", "", "ordinary body token", "8bit"},
++	}
++	for _, m := range messages {
++		msg := fmt.Sprintf("From: %s <sender@example.test>\r\nTo: receiver@example.test\r\nSubject: %s\r\n%sMIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: %s\r\n\r\n%s\r\n", bword("Иван Тест"), m.subject, m.extra, m.transfer, m.body)
++		tc.client.Append("inbox", makeAppendTime(msg, time.Now()))
++	}
++
++	checks := []struct {
++		uid   uint32
++		query string
++		match bool
++	}{
++		{1, `subject "mAiLsTaCk"`, true},
++		{1, `subject "ВХОДЯЩИЙ"`, true},
++		{1, `header subject "mailstack входящий тест"`, true},
++		{1, `text "mailstack входящий тест"`, true},
++		{1, `text "Subject: Mailstack"`, true},
++		{1, `body "Mailstack"`, false},
++		{1, `body "ordinary body"`, true},
++		{1, `not subject "ВХОДЯЩИЙ"`, false},
++		{1, `or subject "ВХОДЯЩИЙ" body "missing"`, true},
++		{1, `from "ИВАН"`, true},
++		{1, `header x-note "CAFÉ"`, true},
++		{1, `text "CAFÉ"`, true},
++		{1, `text "Mailstack" text "ordinary body"`, true},
++		{1, `text "ordinary body" not text "ВХОДЯЩИЙ"`, false},
++		{2, `subject "склад проверка"`, true},
++		{2, `header subject "склад проверка"`, true},
++		{2, `text "склад проверка"`, true},
++		{3, `subject "CAFÉ"`, true},
++		{3, `text "CAFÉ"`, true},
++		{3, `body "ТЕЛО КОДИРОВКА"`, true},
++		{4, `subject "rawtail"`, true},
++		{4, `header x-unknown "rawtoken"`, true},
++		{4, `text "rawtoken"`, true},
++		{4, `header x-note "СОХРАНЁННЫЙ"`, true},
++		{4, `text "СОХРАНЁННЫЙ"`, true},
++		{4, `header subject ""`, true},
++		{4, `header x-missing ""`, false},
++		{5, `body "ТолькоВТеле"`, false},
++		{5, `text "ТолькоВТеле"`, false},
++		{5, `body "=?utf-8?b?"`, true},
++		{6, `subject "ПРЯМОЙ"`, true},
++		{6, `text "ПРЯМОЙ"`, true},
++	}
++	for _, check := range checks {
++		t.Logf("UID %d SEARCH %s", check.uid, check.query)
++		tc.transactf("ok", "uid search charset utf-8 uid %d %s", check.uid, check.query)
++		if check.match {
++			tc.xsearch(check.uid)
++		} else {
++			tc.xsearch()
++		}
++	}
++
++	// Search-argument charsets retain the existing protocol validation.
++	tc.transactf("ok", `uid search charset us-ascii uid 1 subject "MAILSTACK"`)
++	tc.xsearch(1)
++	tc.transactf("no", `uid search charset unknown uid 1 subject "MAILSTACK"`)
++
++	// Searching never rewrites the stored MIME headers.
++	tc.transactf("ok", "uid search uid 1 header subject %s", fmt.Sprintf("%q", bword("Mailstack входящий тест")))
++	tc.xsearch() // Compare decoded text, not the original transfer representation.
++	tc.transactf("ok", "uid fetch 1 body.peek[header.fields (subject)]")
++	tc.xuntagged(tc.untaggedFetch(1, 1, imapclient.FetchBody{
++		RespAttr: "BODY[HEADER.FIELDS (Subject)]",
++		Section:  "HEADER.FIELDS (Subject)",
++		Body:     "Subject: " + bword("Mailstack входящий тест") + "\r\n\r\n",
++	}))
++}

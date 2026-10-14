@@ -1,0 +1,15 @@
+# Optional Web Push
+
+Web Push is disabled by default. The web image can be installed without creating VAPID keys, changing Mox webhooks or contacting a browser push provider. Enable it only after the HTTPS origin, private storage, callback routing, backups and operator consent have been reviewed.
+
+Set `push_enabled: true` in protected installer configuration (or, for an explicitly managed manual deployment, `MAILSTACK_PUSH_ENABLED=1` with an absolute `MAILSTACK_PUSH_DIR`). Compose mounts `${MAILSTACK_ROOT}/private/push` at `/var/lib/mailstack-push`. This directory must be private to the web UID/GID 10001 and persistent across container restarts and image updates. The SQLite file inside it holds VAPID keys, webhook credentials, subscriptions and a delivery queue; it is not part of the Mox mail store and must not be committed to Git. Keep only one active web process/replica.
+
+The user opts in from **Settings → Notifications**. Browser permission is requested only after a user action. On subscription, MailStack registers Mox's standard IncomingWebhook for that account. It does not replace a pre-existing foreign webhook: the UI reports a conflict. Mox must be able to reach `APP_ORIGIN/api/push/incoming/<id>` over HTTPS. The gateway uses a separate Bearer token on that callback. Only new Inbox delivery creates a neutral notification; sender, subject and body are not put in the push payload or queue.
+
+The worker needs outbound HTTPS to browser providers (Google, Mozilla, Apple and Windows). Subscription endpoints are accepted only from an explicit provider allowlist to prevent server-side request forgery. Delivery is at-least-once: a retry after an ambiguous provider response may repeat a notification. Jobs expire after one hour. A user can revoke this browser's subscription in Settings; logout also revokes the current browser subscription. An already forwarded provider notification may still be delivered after revocation.
+
+Back up the private Push SQLite with a consistent SQLite backup, together with the matching Mox webhook configuration and the HTTPS origin. Restoring only one side can break notifications. To disable Push, turn off the feature and revoke subscriptions; do not delete the private directory or alter an unrelated Mox webhook as an incidental rollback. An older web image might not understand callbacks that Mox still sends, so plan a compatible rollback before enabling the feature.
+
+Browser support depends on the operating system and provider. On iOS/iPadOS, the user must open an installed Home Screen app to grant Web Push permission. A closed tab can receive a notification through its service worker, but a fully stopped browser or OS background restrictions can delay it. Service workers do not cache message content or API responses.
+
+Validate on an approved HTTPS test account with a synthetic new Inbox message: opt in, close the tab, verify a neutral notification, open it, then opt out. Local unit/browser tests mock the external provider; they are not proof of real provider delivery.

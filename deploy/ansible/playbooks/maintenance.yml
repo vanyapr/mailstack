@@ -1,0 +1,18 @@
+- name: Run one explicitly selected MailStack maintenance operation
+  hosts: mailstack
+  become: true
+  gather_facts: false
+  vars_files: [../defaults.yml]
+  tasks:
+    - name: Validate the CLI operation
+      ansible.builtin.assert:
+        that:
+          - mailstack_operation in ['status', 'doctor', 'backup', 'restore']
+          - mailstack_operation != 'restore' or mailstack_snapshot is match('^[a-f0-9]{8,64}$')
+    - name: Execute only the installed restricted CLI
+      ansible.builtin.command:
+        argv: "{{ ['python3', mailstack_root + '/private/hostops.py', mailstack_operation] + (['--snapshot', mailstack_snapshot] if mailstack_operation == 'restore' else []) }}"
+      register: mailstack_maintenance
+      changed_when: mailstack_operation in ['backup', 'restore']
+    - ansible.builtin.debug:
+        msg: '{{ mailstack_maintenance.stdout | from_json }}'

@@ -1,0 +1,25 @@
+- name: Install MailStack without changing neighbouring sites
+  hosts: mailstack
+  become: true
+  gather_facts: true
+  vars_files: [../defaults.yml]
+  roles: [preflight, docker]
+  tasks:
+    - ansible.builtin.include_role:
+        name: nginx
+      vars:
+        mailstack_tls_ready: false
+    - ansible.builtin.include_role:
+        name: certificates
+    - ansible.builtin.include_role:
+        name: mox
+    - ansible.builtin.include_role:
+        name: web
+    - ansible.builtin.include_role:
+        name: nginx
+      vars:
+        mailstack_tls_ready: true
+    - ansible.builtin.include_role:
+        name: backup
+    - ansible.builtin.include_role:
+        name: healthcheck

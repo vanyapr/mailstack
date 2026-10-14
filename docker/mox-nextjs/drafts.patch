@@ -1,0 +1,208 @@
+--- a/webmail/api.go
++++ b/webmail/api.go
+@@ -298,0 +299,70 @@
++	return w.messageCompose(ctx, m, mailboxID, "", nil, false, false)
++}
++
++// ComposeFile is an attachment in a draft. Data uses standard JSON base64 bytes.
++type ComposeFile struct {
++	Filename    string
++	ContentType string
++	Data        []byte
++}
++
++// MessageComposeRich saves a complete MIME draft, replacing a previous draft in
++// the same transaction. Existing MessageCompose clients keep their old contract.
++func (w Webmail) MessageComposeRich(ctx context.Context, m ComposeMessage, mailboxID int64, htmlBody string, files []ComposeFile, forward bool) int64 {
++	if len(files) > 20 || len(htmlBody) > 2*1024*1024 || len(m.TextBody) > 1024*1024 {
++		xcheckuserf(ctx, errors.New("draft exceeds content limits"), "checking draft")
++	}
++	var size int
++	for _, file := range files {
++		size += len(file.Data)
++		if size > 15*1024*1024 {
++			xcheckuserf(ctx, errors.New("draft attachments exceed 15 MiB"), "checking draft")
++		}
++		if strings.TrimSpace(file.Filename) == "" || len([]rune(file.Filename)) > 255 || strings.ContainsAny(file.Filename, "/\\") {
++			xcheckuserf(ctx, errors.New("invalid attachment filename"), "checking draft")
++		}
++		for _, c := range file.Filename {
++			if c < 0x20 || c == 0x7f {
++				xcheckuserf(ctx, errors.New("control character in filename"), "checking draft")
++			}
++		}
++		if file.ContentType != "" {
++			_, _, err := mime.ParseMediaType(file.ContentType)
++			xcheckuserf(ctx, err, "checking attachment content-type")
++		}
++	}
++	return w.messageCompose(ctx, m, mailboxID, htmlBody, files, true, forward)
++}
++
++// DraftHTML returns the original HTML part for editing, never for direct rendering.
++// The caller must sanitize it. Only the authenticated account's Draft mailbox is read.
++func (Webmail) DraftHTML(ctx context.Context, msgID int64) (htmlBody string) {
++	reqInfo := ctx.Value(requestInfoCtxKey).(requestInfo)
++	acc, log := reqInfo.Account, reqInfo.Log
++	acc.WithRLock(func() {
++		xdbread(ctx, acc, func(tx *bstore.Tx) {
++			m := xmessageID(ctx, tx, msgID)
++			mb := xmailboxID(ctx, tx, m.MailboxID)
++			if !mb.Draft {
++				xcheckuserf(ctx, errors.New("message is not a draft"), "reading draft")
++			}
++			state := msgState{acc: acc}
++			defer state.clear()
++			pm, err := parsedMessage(log, &m, &state, true, false, false)
++			xcheckf(ctx, err, "parsing draft")
++			if !pm.HasHTML {
++				return
++			}
++			part := &pm.Part
++			for _, index := range pm.HTMLPath {
++				part = &part.Parts[index]
++			}
++			data, err := io.ReadAll(&moxio.LimitReader{R: part.ReaderUTF8OrBinary(), Limit: 2 * 1024 * 1024})
++			xcheckf(ctx, err, "reading draft html")
++			htmlBody = string(data)
++		})
++	})
++	return
++}
++
++func (w Webmail) messageCompose(ctx context.Context, m ComposeMessage, mailboxID int64, htmlBody string, files []ComposeFile, rich, forward bool) (id int64) {
+@@ -398,0 +469,4 @@
++	}
++
++	if forward {
++		xc.Header("X-Mailstack-Forward", "yes")
+@@ -435,5 +509,70 @@
+-	textBody, ct, cte := xc.TextPart("plain", m.TextBody)
+-	xc.Header("Content-Type", ct)
+-	xc.Header("Content-Transfer-Encoding", cte)
+-	xc.Line()
+-	xc.Write([]byte(textBody))
++	writeTextPart := func(mp *multipart.Writer, subtype, content string) {
++		data, ct, cte := xc.TextPart(subtype, content)
++		h := textproto.MIMEHeader{}
++		h.Set("Content-Type", ct)
++		h.Set("Content-Transfer-Encoding", cte)
++		part, err := mp.CreatePart(h)
++		xcheckf(ctx, err, "creating draft text part")
++		_, err = part.Write(data)
++		xcheckf(ctx, err, "writing draft text part")
++	}
++	var mixed *multipart.Writer
++	if len(files) > 0 {
++		mixed = multipart.NewWriter(xc)
++		xc.Header("Content-Type", mime.FormatMediaType("multipart/mixed", map[string]string{"boundary": mixed.Boundary()}))
++		xc.Line()
++	}
++	if htmlBody != "" {
++		alternative := multipart.NewWriter(xc)
++		ct := mime.FormatMediaType("multipart/alternative", map[string]string{"boundary": alternative.Boundary()})
++		if mixed != nil {
++			h := textproto.MIMEHeader{}
++			h.Set("Content-Type", ct)
++			part, err := mixed.CreatePart(h)
++			xcheckf(ctx, err, "creating draft alternative part")
++			boundary := alternative.Boundary()
++			alternative = multipart.NewWriter(part)
++			err = alternative.SetBoundary(boundary)
++			xcheckf(ctx, err, "setting draft alternative boundary")
++		} else {
++			xc.Header("Content-Type", ct)
++			xc.Line()
++		}
++		writeTextPart(alternative, "plain", m.TextBody)
++		writeTextPart(alternative, "html", htmlBody)
++		xcheckf(ctx, alternative.Close(), "closing draft alternative")
++	} else if mixed != nil {
++		writeTextPart(mixed, "plain", m.TextBody)
++	} else {
++		data, ct, cte := xc.TextPart("plain", m.TextBody)
++		xc.Header("Content-Type", ct)
++		xc.Header("Content-Transfer-Encoding", cte)
++		xc.Line()
++		xc.Write(data)
++	}
++	for _, file := range files {
++		ct := file.ContentType
++		if ct == "" {
++			ct = "application/octet-stream"
++		}
++		mediaType, params, err := mime.ParseMediaType(ct)
++		xcheckuserf(ctx, err, "parsing draft attachment type")
++		if strings.HasPrefix(mediaType, "multipart/") {
++			mediaType = "application/octet-stream"
++			params = map[string]string{}
++		}
++		params["name"] = file.Filename
++		h := textproto.MIMEHeader{}
++		h.Set("Content-Type", mime.FormatMediaType(mediaType, params))
++		h.Set("Content-Transfer-Encoding", "base64")
++		h.Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": file.Filename}))
++		part, err := mixed.CreatePart(h)
++		xcheckf(ctx, err, "creating draft attachment")
++		encoded := moxio.Base64Writer(part)
++		_, err = encoded.Write(file.Data)
++		xcheckf(ctx, err, "writing draft attachment")
++		xcheckf(ctx, encoded.Close(), "closing draft attachment")
++	}
++	if mixed != nil {
++		xcheckf(ctx, mixed.Close(), "closing draft multipart")
++	}
+@@ -458,0 +598,14 @@
++
++			if rich {
++				dest := xmailboxID(ctx, tx, mailboxID)
++				if !dest.Draft {
++					xcheckuserf(ctx, errors.New("destination is not a draft mailbox"), "saving draft")
++				}
++				if m.DraftMessageID > 0 {
++					previous := xmessageID(ctx, tx, m.DraftMessageID)
++					previousMailbox := xmailboxID(ctx, tx, previous.MailboxID)
++					if !previousMailbox.Draft {
++						xcheckuserf(ctx, errors.New("previous message is not a draft"), "saving draft")
++					}
++				}
++			}
+--- a/webmail/api_test.go
++++ b/webmail/api_test.go
+@@ -11,0 +12 @@
++	"strings"
+@@ -361,0 +363,34 @@
++	// Earlier special-use tests moved the Draft role; restore the actual target.
++	api.MailboxSetSpecialUse(ctx, store.Mailbox{ID: drafts.ID, SpecialUse: store.SpecialUse{Draft: true}})
++
++	// Rich MIME draft: binary attachments, UTF-8 names, HTML and atomic replacement.
++	rich := ComposeMessage{From: "mjl@mox.example", To: []string{"mjl@mox.example"}, Subject: "Rich draft", TextBody: "draft text"}
++	richFiles := []ComposeFile{{Filename: "тест.bin", ContentType: "application/octet-stream", Data: []byte{0, 1, 255, 13, 10}}, {Filename: "empty.txt", ContentType: "text/plain", Data: []byte{}}}
++	richID := api.MessageComposeRich(ctx, rich, drafts.ID, "<p><i>draft html</i></p>", richFiles, false)
++	tcompare(t, api.ParsedMessage(ctx, richID).HasHTML, true)
++	tcompare(t, len(api.MessageItem(ctx, richID).Attachments), 2)
++	tcompare(t, api.MessageItem(ctx, richID).Attachments[0].Filename, "тест.bin")
++	tcompare(t, strings.Contains(api.DraftHTML(ctx, richID), "<i>draft html</i>"), true)
++	rich.DraftMessageID = richID
++	tneedError(t, func() { api.MessageComposeRich(ctx, rich, inbox.ID, "", nil, false) })
++	tneedError(t, func() {
++		api.MessageComposeRich(ctx, rich, drafts.ID, "", []ComposeFile{{Filename: "bad\nname", Data: []byte{1}}}, false)
++	})
++	tneedError(t, func() {
++		api.MessageComposeRich(ctx, rich, drafts.ID, "", []ComposeFile{{Filename: "file", ContentType: "bad\r\ntype", Data: []byte{1}}}, false)
++	})
++	tneedError(t, func() { api.MessageComposeRich(ctx, rich, drafts.ID, "", make([]ComposeFile, 21), false) })
++	tneedError(t, func() {
++		api.MessageComposeRich(ctx, rich, drafts.ID, "", []ComposeFile{{Filename: "large", Data: make([]byte, 15*1024*1024+1)}}, false)
++	})
++	tcompare(t, len(api.MessageItem(ctx, richID).Attachments), 2)
++	newRichID := api.MessageComposeRich(ctx, rich, drafts.ID, "<p>edited</p>", richFiles[:1], true)
++	tneedError(t, func() { api.ParsedMessage(ctx, richID) })
++	tcompare(t, len(api.MessageItem(ctx, newRichID).Attachments), 1)
++	tcompare(t, strings.Contains(api.DraftHTML(ctx, newRichID), "edited"), true)
++	rich.DraftMessageID = testbox1Alt.ID
++	tneedError(t, func() { api.MessageComposeRich(ctx, rich, drafts.ID, "", nil, false) })
++	api.ParsedMessage(ctx, testbox1Alt.ID)
++	tneedError(t, func() { api.DraftHTML(ctx, testbox1Alt.ID) })
++	api.MessageDelete(ctx, []int64{newRichID})
++

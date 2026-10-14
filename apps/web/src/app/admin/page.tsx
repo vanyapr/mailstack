@@ -1,0 +1,2 @@
+import { AdminApp } from '@/features/admin/AdminApp';
+export default function Page(){return <AdminApp/>;}

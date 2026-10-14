@@ -1,0 +1,94 @@
+- name: Install Docker and Compose from signed Ubuntu packages
+  ansible.builtin.apt:
+    name: [docker.io, docker-compose-v2]
+    state: present
+- name: Enable Docker after reboot
+  ansible.builtin.systemd_service:
+    name: docker
+    enabled: true
+    state: started
+- name: Check Compose version
+  ansible.builtin.command: docker compose version --short
+  register: mailstack_compose_version
+  changed_when: false
+- name: Require Compose v2 or later
+  ansible.builtin.assert:
+    that: mailstack_compose_version.stdout | regex_replace('^v', '') is version('2.20.0', '>=')
+- name: Transfer verified image archives
+  ansible.builtin.copy:
+    src: '{{ item.archive }}'
+    dest: '{{ mailstack_root }}/images/{{ item.name }}.tar'
+    mode: '0600'
+  loop:
+    - {name: mox, archive: '{{ mailstack_mox_archive }}'}
+    - {name: web, archive: '{{ mailstack_web_archive }}'}
+  register: mailstack_transferred_images
+- name: Verify archive SHA-256
+  ansible.builtin.stat:
+    path: '{{ mailstack_root }}/images/{{ item.name }}.tar'
+    checksum_algorithm: sha256
+  loop:
+    - {name: mox, checksum: '{{ mailstack_mox_archive_sha256 }}'}
+    - {name: web, checksum: '{{ mailstack_web_archive_sha256 }}'}
+  register: mailstack_image_checksums
+- ansible.builtin.assert:
+    that: item.stat.checksum == item.item.checksum
+  loop: '{{ mailstack_image_checksums.results }}'
+- name: Load only changed image archives
+  ansible.builtin.command:
+    argv: [docker, load, -i, '{{ item.dest }}']
+  loop: '{{ mailstack_transferred_images.results }}'
+  when: item.changed
+- name: Install verified-archive image identity resolver
+  ansible.builtin.copy:
+    src: '{{ playbook_dir }}/../../bin/image_identity.py'
+    dest: '{{ mailstack_root }}/private/image_identity.py'
+    mode: '0755'
+- name: Resolve the immutable identity of each loaded verified archive
+  ansible.builtin.command:
+    argv: [python3, '{{ mailstack_root }}/private/image_identity.py', '{{ mailstack_root }}/images/{{ item.name }}.tar', '{{ item.image }}']
+  loop:
+    - {name: mox, image: '{{ mailstack_mox_image }}'}
+    - {name: web, image: '{{ mailstack_web_image }}'}
+  register: mailstack_loaded_images
+  changed_when: false
+- name: Pin the exact identities used by this Docker image store
+  ansible.builtin.set_fact:
+    mailstack_runtime_mox_image: '{{ mailstack_loaded_images.results[0].stdout }}'
+    mailstack_runtime_web_image: '{{ mailstack_loaded_images.results[1].stdout }}'
+- name: Verify Mox compatibility before replacing any running application
+  ansible.builtin.command:
+    argv: [docker, run, --rm, '{{ mailstack_runtime_mox_image }}', /bin/mox, version]
+  register: mailstack_candidate_mox_version
+  changed_when: false
+- ansible.builtin.assert:
+    that: mailstack_candidate_mox_version.stdout is search('v0.0.17-mailstack.6-nextjs')
+    fail_msg: The selected Mox generation needs separate API/migration acceptance.
+- name: Preserve private Push state across application replacements
+  ansible.builtin.file:
+    path: '{{ mailstack_root }}/private/push'
+    state: directory
+    owner: '10001'
+    group: '10001'
+    mode: '0700'
+- name: Install Compose file
+  ansible.builtin.copy:
+    src: '{{ playbook_dir }}/../../{{ "compose.yaml" if mailstack_mode == "managed" else "compose.connect.yaml" }}'
+    dest: '{{ mailstack_root }}/compose.yaml'
+    mode: '0600'
+- name: Write runtime variables without passwords
+  ansible.builtin.copy:
+    content: |
+      MAILSTACK_ROOT={{ mailstack_root }}
+      MOX_IMAGE={{ mailstack_runtime_mox_image }}
+      WEB_IMAGE={{ mailstack_runtime_web_image }}
+      APP_ORIGIN=https://{{ mailstack_hostname }}
+      MOX_ORIGIN={{ mailstack_mox_origin | default('http://172.30.95.1:1080') }}
+      MAILSTACK_PUSH_ENABLED={{ '1' if mailstack_push_enabled | default(false) | bool else '0' }}
+    dest: '{{ mailstack_root }}/.env'
+    mode: '0600'
+- name: Prepare the private gateway before Mox binds its listener
+  ansible.builtin.command:
+    argv: "{{ ['docker', 'compose', '--project-directory', mailstack_root] + (['--profile', 'managed-mox'] if mailstack_mode == 'managed' else []) + ['create', '--no-build'] }}"
+  changed_when: false
+  when: not (mailstack_updating | default(false) | bool)

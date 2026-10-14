@@ -1,0 +1,11 @@
+.git
+.github
+artifacts/*
+!artifacts/vendor
+artifacts/vendor/*
+!artifacts/vendor/mox-v0.0.17-source.tar.gz
+deploy/private
+apps/web/node_modules
+apps/web/.next
+**/__pycache__
+**/*.pyc

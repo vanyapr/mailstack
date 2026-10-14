@@ -1,0 +1,69 @@
+# Managed by MailStack Next.js
+server {
+    listen 80;
+    listen [::]:80;
+    server_name {{ mailstack_certificate_names | join(' ') }};
+    location ^~ /.well-known/acme-challenge/ { root /var/lib/mailstack-nextjs-acme; }
+    location / {
+{% if mailstack_actual_tls_ready %}
+        return 308 https://$host$request_uri;
+{% else %}
+        return 503;
+{% endif %}
+    }
+}
+{% if mailstack_actual_tls_ready %}
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    server_name {{ ([mailstack_hostname, 'mail.' + mailstack_domain] if mailstack_mode == 'managed' else [mailstack_hostname]) | unique | join(' ') }};
+    ssl_certificate {{ mailstack_root }}/tls/current/fullchain.pem;
+    ssl_certificate_key {{ mailstack_root }}/tls/current/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    client_max_body_size 24m;
+    add_header Strict-Transport-Security "max-age=31536000" always;
+    add_header X-Content-Type-Options nosniff always;
+    location / {
+        proxy_pass http://127.0.0.1:3100;
+        proxy_http_version 1.1;
+        proxy_set_header Host {{ mailstack_hostname }};
+        proxy_set_header X-Forwarded-Host {{ mailstack_hostname }};
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 360s;
+        proxy_send_timeout 60s;
+    }
+}
+{% if mailstack_mode == 'managed' %}
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    server_name mta-sts.{{ mailstack_domain }} autoconfig.{{ mailstack_domain }} autodiscover.{{ mailstack_domain }};
+    ssl_certificate {{ mailstack_root }}/tls/current/fullchain.pem;
+    ssl_certificate_key {{ mailstack_root }}/tls/current/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    location = /.well-known/mta-sts.txt {
+        proxy_pass http://127.0.0.1:1081;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For $remote_addr;
+    }
+    location = /mail/config-v1.1.xml {
+        proxy_pass http://127.0.0.1:1081;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For $remote_addr;
+    }
+    location = /autodiscover/autodiscover.xml {
+        proxy_pass http://127.0.0.1:1081;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For $remote_addr;
+    }
+    location / { return 404; }
+}
+{% endif %}
+{% endif %}

@@ -1,0 +1,65 @@
+# Managed by MailStack Next.js. Native domains.conf is never regenerated.
+DataDir: ../data
+LogLevel: info
+User: 2000
+Hostname: {{ mailstack_hostname }}
+AdminPasswordFile: adminpasswd
+Listeners:
+	public:
+		IPs:
+			- 0.0.0.0
+			- ::
+		TLS:
+			KeyCerts:
+				-
+					CertFile: /tls/current/fullchain.pem
+					KeyFile: /tls/current/privkey.pem
+		SMTP:
+			Enabled: true
+		Submission:
+			Enabled: true
+		Submissions:
+			Enabled: true
+		IMAPS:
+			Enabled: true
+	internal:
+		IPs:
+			- 127.0.0.1
+			- 172.30.95.1
+		Hostname: localhost
+		AdminHTTP:
+			Enabled: true
+			Port: 1080
+			Path: /admin/
+		AccountHTTP:
+			Enabled: true
+			Port: 1080
+			Path: /account/
+		WebmailHTTP:
+			Enabled: true
+			Port: 1080
+			Path: /webmail/
+		WebAPIHTTP:
+			Enabled: true
+			Port: 1080
+			Path: /webapi/
+	service:
+		IPs:
+			- 127.0.0.1
+		MTASTSHTTPS:
+			Enabled: true
+			Port: 1081
+			NonTLS: true
+			Forwarded: true
+		AutoconfigHTTPS:
+			Enabled: true
+			Port: 1081
+			NonTLS: true
+			Forwarded: true
+Postmaster:
+	Account: {{ mailstack_first_account }}
+	Mailbox: Postmaster
+HostTLSRPT:
+	Localpart: tls-reports
+	Account: {{ mailstack_first_account }}
+	Mailbox: TLSRPT

@@ -1,0 +1,65 @@
+- name: Install Restic on the management host
+  ansible.builtin.apt:
+    name: restic
+    state: present
+- name: Install the restricted host maintenance CLI
+  ansible.builtin.copy:
+    src: '{{ playbook_dir }}/../../bin/hostops.py'
+    dest: '{{ mailstack_root }}/private/hostops.py'
+    mode: '0700'
+- name: Preserve one Restic password across idempotent runs
+  ansible.builtin.copy:
+    content: '{{ mailstack_restic_password }}'
+    dest: '{{ mailstack_root }}/private/restic-password'
+    force: false
+    mode: '0600'
+  when: mailstack_backup_repository | length > 0
+  no_log: true
+- name: Save optional protected S3 credentials
+  ansible.builtin.copy:
+    content: '{{ mailstack_restic_environment | to_nice_json }}'
+    dest: '{{ mailstack_root }}/private/restic-environment.json'
+    mode: '0600'
+  when: mailstack_restic_environment is defined
+  no_log: true
+- name: Probe or explicitly initialize the selected encrypted repository
+  ansible.builtin.command:
+    argv: [python3, '{{ mailstack_root }}/private/hostops.py', backup-init]
+  register: mailstack_repository_probe
+  changed_when: mailstack_repository_probe.rc == 0 and (mailstack_repository_probe.stdout | from_json).initialized
+  when: mailstack_backup_repository | length > 0 and mailstack_mode == 'managed'
+- name: Install backup systemd service
+  ansible.builtin.copy:
+    content: |
+      [Unit]
+      Description=MailStack native encrypted backup
+      After=docker.service network-online.target
+      [Service]
+      Type=oneshot
+      UMask=0077
+      ExecStart=/usr/bin/python3 /opt/mailstack-nextjs/private/hostops.py backup
+      StandardOutput=journal
+      StandardError=journal
+    dest: /etc/systemd/system/mailstack-nextjs-backup.service
+    mode: '0644'
+  register: mailstack_backup_service
+- name: Install configured backup schedule
+  ansible.builtin.copy:
+    content: |
+      [Unit]
+      Description=MailStack backup schedule
+      [Timer]
+      OnCalendar={{ mailstack_backup_schedule }}
+      Persistent=true
+      RandomizedDelaySec=300
+      [Install]
+      WantedBy=timers.target
+    dest: /etc/systemd/system/mailstack-nextjs-backup.timer
+    mode: '0644'
+  register: mailstack_backup_timer
+- name: Enable scheduled backups only with an explicit destination
+  ansible.builtin.systemd_service:
+    name: mailstack-nextjs-backup.timer
+    daemon_reload: '{{ mailstack_backup_timer.changed or mailstack_backup_service.changed }}'
+    enabled: '{{ mailstack_backup_repository | length > 0 and mailstack_mode == "managed" }}'
+    state: '{{ "started" if mailstack_backup_repository | length > 0 and mailstack_mode == "managed" else "stopped" }}'

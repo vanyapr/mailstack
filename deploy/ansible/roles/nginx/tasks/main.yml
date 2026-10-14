@@ -1,0 +1,162 @@
+- name: Install host Nginx
+  ansible.builtin.apt:
+    name: nginx
+    state: present
+- name: Enable the existing Nginx service
+  ansible.builtin.systemd_service:
+    name: nginx
+    enabled: true
+    state: started
+- name: Inspect existing VirtualHosts
+  ansible.builtin.command: nginx -T
+  register: mailstack_nginx_before
+  changed_when: false
+  no_log: true
+- name: Preserve hashes of existing Nginx configuration files
+  ansible.builtin.shell: "find /etc/nginx -type f ! -name mailstack-nextjs.conf -exec sha256sum {} +"
+  register: mailstack_foreign_configs
+  changed_when: false
+  no_log: true
+- name: Hash existing public TLS certificates without reading private keys
+  ansible.builtin.shell: |
+    python3 - <<'PYTHON'
+    import hashlib,json,pathlib,re,shlex,subprocess
+    config=subprocess.check_output(['nginx','-T'],stderr=subprocess.DEVNULL,text=True)
+    sections=re.split(r'# configuration file ([^:]+):\n',config)
+    result={}
+    for i in range(1,len(sections),2):
+      if sections[i]=='/etc/nginx/conf.d/mailstack-nextjs.conf':continue
+      for value in re.findall(r'\bssl_certificate\s+([^;]+);',sections[i+1]):
+        names=shlex.split(value)
+        if len(names)!=1 or '$' in names[0]:continue
+        path=pathlib.Path(names[0])
+        if path.is_file():result[str(path)]=hashlib.sha256(path.read_bytes()).hexdigest()
+    print(json.dumps(result,sort_keys=True))
+    PYTHON
+  register: mailstack_foreign_tls_before
+  changed_when: false
+  no_log: true
+- name: Define managed hostnames
+  ansible.builtin.set_fact:
+    mailstack_certificate_names: "{{ ([mailstack_hostname, 'mail.' + mailstack_domain, 'mta-sts.' + mailstack_domain, 'autoconfig.' + mailstack_domain, 'autodiscover.' + mailstack_domain] if mailstack_mode == 'managed' else [mailstack_hostname]) | unique | list }}"
+- name: Refuse a hostname already configured outside the owned vhost
+  ansible.builtin.shell: |
+    python3 - <<'PY'
+    import re, subprocess, json
+    config=subprocess.check_output(['nginx','-T'],stderr=subprocess.DEVNULL,text=True)
+    sections=re.split(r'# configuration file ([^:]+):\n',config)
+    hosts=set()
+    for i in range(1,len(sections),2):
+      if sections[i]=='/etc/nginx/conf.d/mailstack-nextjs.conf':continue
+      for group in re.findall(r'\bserver_name\s+([^;]+);',sections[i+1]):hosts.update(group.split())
+    managed=set(json.loads({{ mailstack_certificate_names | to_json | to_json }}))
+    if hosts & managed:raise SystemExit('A managed hostname already belongs to another vhost')
+    print(json.dumps(sorted(h for h in hosts if re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9.-]*',h) and h not in managed and h!='localhost')))
+    PY
+  register: mailstack_discovered_sites
+  changed_when: false
+- name: Remember neighbouring sites for health verification
+  ansible.builtin.set_fact:
+    mailstack_neighbours: '{{ (mailstack_existing_sites + (mailstack_discovered_sites.stdout | from_json)) | unique | list }}'
+- name: Probe existing websites before the change
+  ansible.builtin.uri:
+    url: http://127.0.0.1/
+    headers: {Host: '{{ item }}'}
+    return_content: true
+    follow_redirects: none
+    status_code: [200, 301, 302, 401, 403, 404]
+  loop: '{{ mailstack_neighbours }}'
+  register: mailstack_sites_before
+  no_log: true
+- name: Prepare ACME challenge directory
+  ansible.builtin.file:
+    path: /var/lib/mailstack-nextjs-acme
+    state: directory
+    mode: '0755'
+- name: Inspect staged TLS
+  ansible.builtin.stat:
+    path: '{{ mailstack_root }}/tls/current/fullchain.pem'
+  register: mailstack_staged_tls
+- name: Keep HTTPS on an idempotent rerun
+  ansible.builtin.set_fact:
+    mailstack_actual_tls_ready: '{{ mailstack_tls_ready | bool or mailstack_staged_tls.stat.exists }}'
+- name: Install rollback-aware Nginx helper
+  ansible.builtin.copy:
+    src: '{{ playbook_dir }}/../../bin/nginx_apply.py'
+    dest: '{{ mailstack_root }}/private/nginx_apply.py'
+    mode: '0700'
+- name: Inspect the previous owned vhost
+  ansible.builtin.stat:
+    path: /etc/nginx/conf.d/mailstack-nextjs.conf
+  register: mailstack_previous_vhost_stat
+- name: Read the previous owned vhost for automatic rollback
+  ansible.builtin.slurp:
+    src: /etc/nginx/conf.d/mailstack-nextjs.conf
+  register: mailstack_previous_vhost
+  when: mailstack_previous_vhost_stat.stat.exists
+  no_log: true
+- name: Render candidate vhost
+  ansible.builtin.template:
+    src: vhost.conf.j2
+    dest: '{{ mailstack_root }}/private/nginx-candidate.conf'
+    mode: '0600'
+- block:
+    - name: Validate, apply and gracefully reload only the owned configuration
+      ansible.builtin.command:
+        argv: [python3, '{{ mailstack_root }}/private/nginx_apply.py', '{{ mailstack_root }}/private/nginx-candidate.conf']
+      register: mailstack_nginx_applied
+      changed_when: (mailstack_nginx_applied.stdout | from_json).changed
+    - name: Recheck existing websites
+      ansible.builtin.uri:
+        url: http://127.0.0.1/
+        headers: {Host: '{{ item.item }}'}
+        return_content: true
+        follow_redirects: none
+        status_code: '{{ item.status }}'
+      loop: '{{ mailstack_sites_before.results }}'
+      register: mailstack_sites_after
+      no_log: true
+    - name: Require configured stable markers in neighbouring responses
+      ansible.builtin.assert:
+        that:
+          - mailstack_existing_site_markers.get(item.item.item, '') in (item.content | default(''))
+      loop: '{{ mailstack_sites_after.results }}'
+      no_log: true
+    - name: Recheck foreign configuration hashes
+      ansible.builtin.shell: "find /etc/nginx -type f ! -name mailstack-nextjs.conf -exec sha256sum {} +"
+      register: mailstack_foreign_configs_after
+      changed_when: false
+      no_log: true
+    - ansible.builtin.assert:
+        that: mailstack_foreign_configs.stdout_lines | sort == mailstack_foreign_configs_after.stdout_lines | sort
+        fail_msg: A foreign configuration changed during the operation; inspect before continuing.
+      no_log: true
+    - name: Verify that existing public TLS certificate files are unchanged
+      ansible.builtin.shell: |
+        python3 - <<'PYTHON'
+        import hashlib,json,pathlib
+        before=json.loads({{ mailstack_foreign_tls_before.stdout | to_json }})
+        assert all(pathlib.Path(path).is_file() and hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest()==digest for path,digest in before.items())
+        PYTHON
+      changed_when: false
+      no_log: true
+  rescue:
+    - name: Restore only the previous owned vhost after a failed health check
+      ansible.builtin.copy:
+        content: '{{ mailstack_previous_vhost.content | b64decode }}'
+        dest: /etc/nginx/conf.d/mailstack-nextjs.conf
+        mode: '0644'
+      when: mailstack_previous_vhost_stat.stat.exists
+      no_log: true
+    - name: Remove only a failed first-install owned vhost
+      ansible.builtin.file:
+        path: /etc/nginx/conf.d/mailstack-nextjs.conf
+        state: absent
+      when: not mailstack_previous_vhost_stat.stat.exists
+    - ansible.builtin.command: nginx -t
+      changed_when: false
+    - ansible.builtin.systemd_service:
+        name: nginx
+        state: reloaded
+    - ansible.builtin.fail:
+        msg: Nginx or neighbouring site verification failed. The previous owned route was restored; foreign configurations were preserved.

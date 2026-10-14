@@ -1,0 +1,68 @@
+- name: Remove only the MailStack application and owned routes; retain all data and backups
+  hosts: mailstack
+  become: true
+  gather_facts: false
+  vars_files: [../defaults.yml]
+  tasks:
+    - ansible.builtin.stat:
+        path: '{{ mailstack_root }}/OWNED-BY-MAILSTACK-NEXTJS'
+      register: mailstack_uninstall_owner
+    - ansible.builtin.assert:
+        that: mailstack_uninstall_owner.stat.exists
+        fail_msg: Installation ownership is not established.
+    - name: Stop only the owned backup timer
+      ansible.builtin.systemd_service:
+        name: mailstack-nextjs-backup.timer
+        state: stopped
+        enabled: false
+    - name: Remove only owned containers and network, retaining bind-mounted mail data
+      ansible.builtin.command:
+        argv: [docker, compose, --project-directory, '{{ mailstack_root }}', --profile, managed-mox, down]
+    - name: Inspect route ownership before removing it
+      ansible.builtin.slurp:
+        src: /etc/nginx/conf.d/mailstack-nextjs.conf
+      register: mailstack_uninstall_route
+    - ansible.builtin.assert:
+        that: (mailstack_uninstall_route.content | b64decode).startswith('# Managed by MailStack Next.js')
+    - name: Remove the owned route only
+      ansible.builtin.file:
+        path: /etc/nginx/conf.d/mailstack-nextjs.conf
+        state: absent
+    - name: Validate remaining sites before reload
+      ansible.builtin.command: nginx -t
+      changed_when: false
+    - ansible.builtin.systemd_service:
+        name: nginx
+        state: reloaded
+    - name: Inspect the owned API firewall service
+      ansible.builtin.stat:
+        path: /etc/systemd/system/mailstack-nextjs-firewall.service
+      register: mailstack_uninstall_firewall
+    - name: Stop only the owned firewall service
+      ansible.builtin.systemd_service:
+        name: mailstack-nextjs-firewall
+        state: stopped
+        enabled: false
+      when: mailstack_uninstall_firewall.stat.exists
+    - name: Remove only the exact owned firewall rule and chain
+      ansible.builtin.shell: |
+        if iptables -S MSNX_API >/dev/null 2>&1; then
+          if iptables -C INPUT -d 172.30.95.1/32 -p tcp --dport 1080 -j MSNX_API 2>/dev/null; then
+            iptables -D INPUT -d 172.30.95.1/32 -p tcp --dport 1080 -j MSNX_API
+          fi
+          iptables -F MSNX_API
+          iptables -X MSNX_API
+        fi
+      when: mailstack_uninstall_firewall.stat.exists
+    - ansible.builtin.file:
+        path: /etc/systemd/system/mailstack-nextjs-firewall.service
+        state: absent
+      when: mailstack_uninstall_firewall.stat.exists
+    - ansible.builtin.systemd_service:
+        daemon_reload: true
+    - name: Remove only the owned certificate deploy hook
+      ansible.builtin.file:
+        path: /etc/letsencrypt/renewal-hooks/deploy/mailstack-nextjs
+        state: absent
+    - ansible.builtin.debug:
+        msg: Application stopped. Mail data, certificates, configuration, image archives and every Restic snapshot are retained under the protected installation root/repository.

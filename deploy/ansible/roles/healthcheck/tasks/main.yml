@@ -1,0 +1,19 @@
+- name: Wait for native IMAPS readiness
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: 993
+    timeout: 60
+  when: mailstack_mode == 'managed'
+- name: Run truthful TLS, DNS, containers and storage diagnostics
+  ansible.builtin.command:
+    argv: [python3, '{{ mailstack_root }}/private/hostops.py', doctor]
+  register: mailstack_doctor
+  changed_when: false
+- name: Require local service checks to pass
+  ansible.builtin.assert:
+    that:
+      - (mailstack_doctor.stdout | from_json).checks | rejectattr('name', 'in', ['DNS', 'DNS и внешняя доставка']) | selectattr('status', 'ne', 'ok') | list | length == 0
+    fail_msg: Local service acceptance failed. Inspect the owned host report before using the installation.
+- name: Report installation phase without claiming external delivery
+  ansible.builtin.debug:
+    msg: '{{ mailstack_doctor.stdout | from_json }}'

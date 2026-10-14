@@ -1,0 +1,96 @@
+name: MailStack Next.js checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  application:
+    name: Next.js application
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      NEXT_TELEMETRY_DISABLED: '1'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - name: Test the web application
+        run: |
+          npm ci --prefix apps/web
+          npm run typecheck --prefix apps/web
+          npm test --prefix apps/web
+          npm run build --prefix apps/web
+          npm audit --prefix apps/web --audit-level=high
+
+  infrastructure:
+    name: Deployment safety
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - name: Validate the controller and Ansible helpers
+        run: |
+          python -m compileall -q cli deploy/bin scripts tests/nextjs
+          python -m unittest discover -s tests/nextjs -p 'test_*.py' -v
+
+  mox:
+    name: Mox source extensions
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Test the pinned Mox source on Linux
+        run: |
+          python scripts/prepare_mox_source.py
+          docker build --target test --file docker/mox-nextjs/Dockerfile .
+
+  acceptance:
+    name: Local Mox acceptance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    env:
+      NEXT_TELEMETRY_DISABLED: '1'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - name: Build the isolated local stack
+        run: |
+          npm ci --prefix apps/web
+          python scripts/dev_nextjs.py
+      - name: Exercise real Mox API flows
+        run: npm run test:integration --prefix apps/web
+      - name: Exercise desktop and mobile browser flows
+        working-directory: apps/web
+        run: |
+          npx playwright install --with-deps chromium webkit
+          npm run test:e2e

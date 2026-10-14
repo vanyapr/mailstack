@@ -1,0 +1,83 @@
+- name: Install the host ACME client
+  ansible.builtin.apt:
+    name: certbot
+    state: present
+- name: Install certificate deploy hook
+  ansible.builtin.copy:
+    src: '{{ playbook_dir }}/../../bin/tls_deploy.py'
+    dest: '{{ mailstack_root }}/private/tls_deploy.py'
+    mode: '0700'
+- name: Install read-only existing-certificate discovery
+  ansible.builtin.copy:
+    src: '{{ playbook_dir }}/../../bin/select_certificate.py'
+    dest: '{{ mailstack_root }}/private/select_certificate.py'
+    mode: '0700'
+- name: Find an already suitable trusted certificate before requesting ACME
+  ansible.builtin.command:
+    argv: "{{ ['python3', mailstack_root + '/private/select_certificate.py'] + mailstack_certificate_names }}"
+  register: mailstack_existing_certificate
+  changed_when: false
+  when: mailstack_certificate_mode == 'acme' and mailstack_certificate_lineage is not defined
+- name: Reuse the matching lineage without changing its renewal configuration
+  ansible.builtin.set_fact:
+    mailstack_certificate_lineage: '{{ (mailstack_existing_certificate.stdout | from_json).lineage }}'
+  when: mailstack_existing_certificate is not skipped and (mailstack_existing_certificate.stdout | from_json).lineage is not none
+- name: Inspect explicitly selected certificate lineage
+  ansible.builtin.stat:
+    path: "{{ mailstack_certificate_lineage | default('/etc/letsencrypt/live/mailstack-nextjs-' + mailstack_hostname) }}/fullchain.pem"
+  register: mailstack_certificate_exists
+- name: Require a certificate in reuse mode
+  ansible.builtin.assert:
+    that: mailstack_certificate_exists.stat.exists
+    fail_msg: No matching certificate was supplied for reuse. Existing certificates are preserved.
+  when: mailstack_certificate_mode == 'reuse'
+- name: Issue only the owned certificate with HTTP-01
+  ansible.builtin.command:
+    argv: "{{ ['certbot', 'certonly', '--non-interactive', '--agree-tos', '--register-unsafely-without-email', '--webroot', '-w', '/var/lib/mailstack-nextjs-acme', '--cert-name', 'mailstack-nextjs-' + mailstack_hostname] + (mailstack_certificate_names | map('regex_replace', '^', '-d=') | list) }}"
+  when: mailstack_certificate_mode == 'acme' and not mailstack_certificate_exists.stat.exists
+- name: Create lab certificate directory
+  ansible.builtin.file:
+    path: '{{ mailstack_root }}/private/lab-certificate'
+    state: directory
+    mode: '0700'
+  when: mailstack_certificate_mode == 'lab'
+- name: Generate a test-only certificate once
+  ansible.builtin.command:
+    argv: [openssl, req, -x509, -newkey, 'rsa:2048', -nodes, -days, '30', -subj, '/CN={{ mailstack_hostname }}', -addext, 'subjectAltName={{ mailstack_certificate_names | map("regex_replace", "^", "DNS:") | join(",") }}', -keyout, '{{ mailstack_root }}/private/lab-certificate/privkey.pem', -out, '{{ mailstack_root }}/private/lab-certificate/fullchain.pem']
+    creates: '{{ mailstack_root }}/private/lab-certificate/fullchain.pem'
+  when: mailstack_certificate_mode == 'lab'
+  no_log: true
+- name: Restrict the lab private key
+  ansible.builtin.file:
+    path: '{{ mailstack_root }}/private/lab-certificate/privkey.pem'
+    mode: '0600'
+  when: mailstack_certificate_mode == 'lab'
+- name: Select certificate lineage
+  ansible.builtin.set_fact:
+    mailstack_selected_lineage: "{{ mailstack_root + '/private/lab-certificate' if mailstack_certificate_mode == 'lab' else mailstack_certificate_lineage | default('/etc/letsencrypt/live/mailstack-nextjs-' + mailstack_hostname) }}"
+- name: Save protected host runtime configuration
+  ansible.builtin.copy:
+    content: "{{ {'hostname': mailstack_hostname, 'domain': mailstack_domain, 'mode': mailstack_mode, 'initialize_backup': mailstack_initialize_backup | bool, 'lab': mailstack_lab | bool, 'certificate_names': mailstack_certificate_names, 'certificate_lineage': mailstack_selected_lineage, 'tls_ca_file': mailstack_selected_lineage + '/fullchain.pem' if mailstack_lab | bool else none, 'backup_repository': mailstack_backup_repository, 'backup_schedule': mailstack_backup_schedule, 'mox_image': mailstack_runtime_mox_image, 'web_image': mailstack_runtime_web_image} | to_nice_json }}"
+    dest: '{{ mailstack_root }}/private/runtime.json'
+    mode: '0600'
+  no_log: true
+- name: Validate and stage certificates without stopping mail
+  ansible.builtin.command:
+    argv: [python3, '{{ mailstack_root }}/private/tls_deploy.py', --stage-only]
+  register: mailstack_certificate_staged
+  changed_when: mailstack_certificate_staged.rc == 0 and (mailstack_certificate_staged.stdout | from_json).changed
+- name: Install hook for only this certificate lineage
+  ansible.builtin.copy:
+    content: |
+      #!/bin/sh
+      set -eu
+      exec python3 /opt/mailstack-nextjs/private/tls_deploy.py
+    dest: /etc/letsencrypt/renewal-hooks/deploy/mailstack-nextjs
+    mode: '0700'
+  when: mailstack_certificate_mode != 'lab'
+- name: Enable certificate renewal timer
+  ansible.builtin.systemd_service:
+    name: certbot.timer
+    enabled: true
+    state: started
+  when: mailstack_certificate_mode != 'lab'

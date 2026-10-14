@@ -1,0 +1,55 @@
+# Local acceptance only. localserve routes every delivery back to itself.
+name: mailstack-nextjs-local
+services:
+  mox:
+    image: ${MOX_IMAGE:?Verified Mox image required}
+    pull_policy: never
+    restart: unless-stopped
+    command: [/bin/sh, -ec, 'if [ ! -f /state/local/mox.conf ]; then /bin/mox localserve -dir /state/local -ip 0.0.0.0 -initonly; fi; sed -i "s/^LogLevel:.*/LogLevel: info/" /state/local/mox.conf; exec /bin/mox localserve -dir /state/local']
+    networks:
+      default: {ipv4_address: "${MAILSTACK_DEV_MOX_IP:-10.249.96.2}"}
+    volumes: [mail:/state]
+    ports: ["127.0.0.1:11080:1080", "127.0.0.1:11993:1993"]
+    stop_grace_period: 30s
+    healthcheck:
+      test: [CMD-SHELL, 'wget -q -O /dev/null http://127.0.0.1:1080/webmail/']
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    logging: {driver: json-file, options: {max-size: "10m", max-file: "3"}}
+  web:
+    image: ${WEB_IMAGE:?Verified Next.js image required}
+    pull_policy: never
+    restart: unless-stopped
+    init: true
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: ["/tmp:mode=1777,size=64m"]
+    ports: ["127.0.0.1:3100:3100"]
+    environment:
+      MAILSTACK_LOCAL: "1"
+      APP_ORIGIN: http://127.0.0.1:3100
+      MOX_ORIGIN: http://${MAILSTACK_DEV_MOX_IP:-10.249.96.2}:1080
+      TRUST_NGINX: "0"
+      # Explicit opt-in only for this isolated synthetic acceptance fixture.
+      MAILSTACK_PUSH_ENABLED: "1"
+      MAILSTACK_PUSH_DIR: /var/lib/mailstack-push
+    volumes: [push:/var/lib/mailstack-push]
+    depends_on: {mox: {condition: service_healthy}}
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:3100/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    logging: {driver: json-file, options: {max-size: "10m", max-file: "3"}}
+volumes:
+  mail:
+    name: mailstack-nextjs-local-mail
+  push:
+    name: mailstack-nextjs-local-push
+networks:
+  default:
+    ipam:
+      config: [{subnet: '${MAILSTACK_DEV_SUBNET:-10.249.96.0/28}'}]
