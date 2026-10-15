@@ -6,6 +6,14 @@ MailStack is a self-hosted webmail and administration interface for [Mox](https:
 
 This is source code for operators and contributors, not a hosted mail service or a one-command production mail migration. A production installation needs a domain, DNS, TLS, a checked Linux target, external backups, and an operator who can verify mail delivery and recovery. Do not run the installer against an existing mail server without reading the [deployment boundaries](docs/DEPLOYMENT.md).
 
+## Screenshots
+
+Inbox and message composer. Account details and message content are hidden for privacy.
+
+![MailStack inbox with folder navigation and message list](docs/screenshots/mailstack-inbox.png)
+
+![MailStack message composer with recipient fields, formatting and attachment controls](docs/screenshots/mailstack-compose.png)
+
 ## What is included
 
 | Directory | Purpose |
